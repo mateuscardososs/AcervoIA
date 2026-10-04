@@ -1,7 +1,10 @@
-from fastapi import APIRouter, HTTPException
-from sqlalchemy.exc import SQLAlchemyError
+import logging
 
-from acervo_ia.db.connection import ping_database
+from fastapi import APIRouter, HTTPException
+
+from acervo_ia.db.connection import DatabaseUnavailableError, ping_database
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
@@ -15,10 +18,11 @@ def health() -> dict[str, str]:
 def database_health() -> dict[str, str]:
     try:
         ping_database()
-    except (RuntimeError, SQLAlchemyError) as error:
+    except DatabaseUnavailableError:
+        logger.warning("Falha na verificação do banco de dados.")
         raise HTTPException(
             status_code=503,
             detail="Não foi possível conectar ao banco de dados.",
-        ) from error
+        ) from None
 
     return {"status": "ok", "database": "postgresql"}

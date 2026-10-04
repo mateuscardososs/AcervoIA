@@ -12,4 +12,5 @@ src/acervo_ia/api/routes/__init__.py
 src/acervo_ia/api/routes/health.py
 src/acervo_ia/db/connection.py
 src/acervo_ia/db/models.py
+tests/test_auth.py
 tests/test_health.py

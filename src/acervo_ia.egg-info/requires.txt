@@ -3,6 +3,9 @@ uvicorn[standard]<1.0,>=0.34
 SQLAlchemy<3.0,>=2.0
 psycopg[binary]<4.0,>=3.2
 python-dotenv<2.0,>=1.0
+PyJWT<3.0,>=2.10
+pwdlib[argon2]<1.0,>=0.2
+python-multipart<1.0,>=0.0.20
 
 [dev]
 httpx<1.0,>=0.27
