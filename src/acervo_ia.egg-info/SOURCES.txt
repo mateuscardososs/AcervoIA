@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/acervo_ia/__init__.py
+src/acervo_ia/main.py
+src/acervo_ia.egg-info/PKG-INFO
+src/acervo_ia.egg-info/SOURCES.txt
+src/acervo_ia.egg-info/dependency_links.txt
+src/acervo_ia.egg-info/requires.txt
+src/acervo_ia.egg-info/top_level.txt
+src/acervo_ia/api/__init__.py
+src/acervo_ia/api/routes/__init__.py
+src/acervo_ia/api/routes/health.py
+src/acervo_ia/db/connection.py
+src/acervo_ia/db/models.py
+tests/test_health.py
