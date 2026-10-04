@@ -1,0 +1,23 @@
+MANUAL FICTÍCIO — Atlas T30 — versão 2.0
+Documento demonstrativo do AcervoIA. Equipamento, especificações e procedimentos são inventados e não devem ser aplicados a produtos reais.
+
+[ATLAS-01] IDENTIFICAÇÃO
+Modelo: Atlas T30. Versão do manual: 2.0. Indicador de pesagem de bancada fictício.
+
+[ATLAS-02] ALIMENTAÇÃO
+Para o exemplo Atlas T30, a alimentação indicada é 24 V DC fornecida pelo adaptador fictício AT-24. Este valor é exclusivo do cenário inventado e não deve ser usado em equipamento real.
+
+[ATLAS-03] ANTES DA INSTALAÇÃO
+Antes de instalar o Atlas T30, confirme que o local está seco e ventilado, que a bancada está firme e nivelada e que a plataforma está sem carga. Inspecione o cabo e não prossiga se houver dano visível; contate assistência autorizada fictícia.
+
+[ATLAS-04] CONEXÃO
+Com o indicador desligado, conecte a plataforma à porta marcada CELL. Ligue o indicador apenas depois de verificar que a conexão está firme. O Atlas T30 não usa a sequência de conexão descrita para o Orion B20.
+
+[ATLAS-05] CÓDIGO E-17
+No Atlas T30, E-17 indica sobrecarga detectada durante a inicialização. Remova a carga da plataforma e faça uma nova inicialização. Se o aviso persistir sem carga, interrompa o uso e procure assistência autorizada fictícia. Não abra o gabinete.
+
+[ATLAS-06] COMUNICAÇÃO
+O Atlas T30 oferece uma interface serial fictícia chamada Link-T. A taxa padrão descrita neste manual é 9600 bps. O formato de mensagem não é especificado nesta versão.
+
+[ATLAS-07] LIMPEZA E RESTRIÇÃO
+Desligue o Atlas T30 antes de limpar a parte externa. Use pano macio levemente umedecido e seque em seguida. Não permita entrada de líquido. A abertura do gabinete, a calibração e o reparo interno são restritos à assistência autorizada fictícia.

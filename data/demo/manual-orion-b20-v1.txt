@@ -1,0 +1,23 @@
+MANUAL FICTÍCIO — Orion B20 — versão 1.0
+Documento demonstrativo do AcervoIA. Equipamento, especificações e procedimentos são inventados e não devem ser aplicados a produtos reais.
+
+[ORION-01] IDENTIFICAÇÃO
+Modelo: Orion B20. Versão do manual: 1.0. Indicador de pesagem de bancada fictício.
+
+[ORION-02] ALIMENTAÇÃO
+Para o exemplo Orion B20, a alimentação indicada é 12 V DC fornecida pelo adaptador fictício AB-12 incluído no cenário de demonstração. Não use esta informação para selecionar fonte de alimentação de equipamento real.
+
+[ORION-03] ANTES DA INSTALAÇÃO
+Antes de instalar o Orion B20, confira se a bancada está firme e nivelada, se a plataforma está livre de objetos e se o cabo apresenta danos visíveis. Se encontrar dano no cabo, interrompa a preparação e encaminhe o equipamento ao suporte autorizado fictício.
+
+[ORION-04] INSTALAÇÃO
+Posicione o conjunto em uma superfície firme e nivelada. Conecte a plataforma ao indicador com o equipamento desligado. Só então conecte o adaptador AB-12 à entrada de alimentação.
+
+[ORION-05] CÓDIGO E-17
+No Orion B20, E-17 indica que a plataforma não foi detectada durante a inicialização. Desligue o indicador, confira se o conector externo da plataforma está encaixado e reinicie uma única vez. Se o código permanecer, interrompa o uso e procure assistência autorizada fictícia. Não abra o indicador.
+
+[ORION-06] CALIBRAÇÃO
+A calibração do Orion B20 deve ser feita por assistência autorizada fictícia usando o procedimento de serviço correspondente à versão 1.0. O manual de demonstração não fornece sequência de teclas para calibração.
+
+[ORION-07] LIMPEZA E RESTRIÇÃO
+Desligue o equipamento antes da limpeza externa e use pano seco e macio. Não aplique líquido nas aberturas. A abertura do gabinete e qualquer reparo interno são restritos à assistência autorizada fictícia.
