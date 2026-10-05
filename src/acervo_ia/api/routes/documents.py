@@ -16,7 +16,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -26,8 +26,13 @@ from acervo_ia.config import (
     MAX_DOCUMENT_SIZE_BYTES,
 )
 from acervo_ia.db.connection import get_db
-from acervo_ia.db.models import Collection, Document, User
+from acervo_ia.db.models import Collection, Document, DocumentChunk, User
 from acervo_ia.security import get_current_user
+from acervo_ia.services.document_processing import (
+    DocumentExtractionError,
+    chunk_pages,
+    extract_document_pages,
+)
 
 router = APIRouter(prefix="/collections", tags=["documents"])
 
@@ -40,6 +45,14 @@ class DocumentResponse(BaseModel):
     content_type: str
     size_bytes: int
     created_at: datetime
+    processing_status: str
+    processing_error: str | None
+
+
+class DocumentProcessingResponse(BaseModel):
+    document_id: UUID
+    processing_status: str
+    chunk_count: int
 
 
 def _get_owned_collection(
@@ -231,3 +244,78 @@ def delete_document(
             detail="Não foi possível remover o arquivo armazenado.",
         ) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{collection_id}/documents/{document_id}/process",
+    response_model=DocumentProcessingResponse,
+)
+def process_document(
+    collection_id: UUID,
+    document_id: UUID,
+    session: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> DocumentProcessingResponse:
+    collection = _get_owned_collection(collection_id, user, session)
+    document = session.scalar(
+        select(Document).where(
+            Document.id == document_id,
+            Document.collection_id == collection.id,
+        )
+    )
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Documento não encontrado.",
+        )
+
+    stored_path = _safe_storage_path(document.storage_key)
+    document.processing_status = "processing"
+    document.processing_error = None
+    session.commit()
+
+    try:
+        pages = extract_document_pages(stored_path, document.content_type)
+        chunks = chunk_pages(pages)
+    except (DocumentExtractionError, ValueError):
+        return _fail_document_processing(document, session)
+
+    if not chunks:
+        return _fail_document_processing(document, session)
+
+    session.execute(
+        delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+    )
+    session.add_all(
+        DocumentChunk(
+            document_id=document.id,
+            position=position,
+            page_number=chunk.page_number,
+            content=chunk.content,
+        )
+        for position, chunk in enumerate(chunks)
+    )
+    document.processing_status = "completed"
+    document.processing_error = None
+    session.commit()
+    return DocumentProcessingResponse(
+        document_id=document.id,
+        processing_status=document.processing_status,
+        chunk_count=len(chunks),
+    )
+
+
+def _fail_document_processing(
+    document: Document,
+    session: Session,
+) -> DocumentProcessingResponse:
+    session.execute(
+        delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+    )
+    document.processing_status = "failed"
+    document.processing_error = "Não foi possível extrair texto do documento."
+    session.commit()
+    raise HTTPException(
+        status_code=422,
+        detail=document.processing_error,
+    ) from None
