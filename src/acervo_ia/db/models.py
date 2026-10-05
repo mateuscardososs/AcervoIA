@@ -1,7 +1,16 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -42,3 +51,25 @@ class Collection(Base):
     )
 
     owner: Mapped["User"] = relationship(back_populates="collections")
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    collection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), index=True
+    )
+    original_filename: Mapped[str] = mapped_column(Text)
+    storage_key: Mapped[str] = mapped_column(String(32), unique=True)
+    content_type: Mapped[str] = mapped_column(String(127))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    collection: Mapped["Collection"] = relationship(back_populates="documents")
