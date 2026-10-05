@@ -13,6 +13,10 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
+from pgvector.sqlalchemy import VECTOR
+
+from acervo_ia.config import EMBEDDING_DIMENSIONS
 
 
 class Base(DeclarativeBase):
@@ -105,6 +109,10 @@ class DocumentChunk(Base):
             "page_number IS NULL OR page_number > 0",
             name="ck_document_chunks_page_number",
         ),
+        CheckConstraint(
+            "(embedding IS NULL) = (embedding_model IS NULL)",
+            name="ck_document_chunks_embedding_model_pair",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -114,5 +122,12 @@ class DocumentChunk(Base):
     position: Mapped[int] = mapped_column(Integer)
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        VECTOR(EMBEDDING_DIMENSIONS).with_variant(
+            JSON(none_as_null=True), "sqlite"
+        ),
+        nullable=True,
+    )
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")

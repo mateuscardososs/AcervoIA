@@ -35,7 +35,7 @@ Em outro terminal, com o ambiente virtual ativado:
 pytest
 ```
 
-`/health` confirma que a API está respondendo; `/health/database` verifica o PostgreSQL. A API ainda não verifica Ollama.
+`/health` confirma que a API está respondendo; `/health/database` verifica o PostgreSQL.
 
 ## Autenticação
 
@@ -44,3 +44,9 @@ O login usa `POST /auth/token` com formulário OAuth2 (`username` recebe o e-mai
 As senhas são armazenadas com hash Argon2. Configure `AUTH_SECRET_KEY` no ambiente do processo com uma chave aleatória de pelo menos 32 bytes. Gere uma com `openssl rand -hex 32`; mantenha o resultado fora do Git e nunca o compartilhe. Para carregar variáveis do `.env` local ao iniciar a API, use `uvicorn acervo_ia.main:app --reload --app-dir src --env-file .env`.
 
 Para criar uma conta local sem rota de cadastro público, execute `.venv/bin/python -m acervo_ia.cli`. O comando pede o e-mail e solicita a senha duas vezes sem exibi-la.
+
+## Processar documentos e buscar trechos
+
+O PostgreSQL do Compose usa a imagem `pgvector/pgvector`; após aplicar as migrações, cada trecho pode guardar um vetor de 768 dimensões e o nome do modelo que o gerou. A configuração padrão usa o Ollama local em `http://127.0.0.1:11434` e o modelo `embeddinggemma` (Ollama 0.11.10 ou superior). Inicie o Ollama, baixe o modelo com `ollama pull embeddinggemma` e configure `OLLAMA_BASE_URL` ou `OLLAMA_EMBEDDING_MODEL` no ambiente da API se necessário. A dimensão do modelo precisa continuar em 768 nesta versão; mudar essa dimensão exige uma migração de banco correspondente.
+
+No `/docs`, autentique-se com o botão **Authorize** usando o token obtido em `POST /auth/token`. Crie uma coleção e envie um PDF, DOCX ou TXT pela rota de documentos. Processe-o em `POST /collections/{collection_id}/documents/{document_id}/process`; depois gere ou atualize um vetor por trecho em `POST /collections/{collection_id}/documents/{document_id}/embeddings`. Por fim, envie `{ "query": "sua pergunta", "limit": 5 }` para `POST /collections/{collection_id}/search`. A busca retorna os trechos ordenados por similaridade cosseno, nome do documento, página quando disponível e pontuação. Esta etapa só recupera evidências; não gera resposta com modelo de chat. As rotas verificam a propriedade da coleção pelo usuário autenticado.
