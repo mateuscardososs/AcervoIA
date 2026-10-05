@@ -42,3 +42,5 @@ pytest
 O login usa `POST /auth/token` com formulário OAuth2 (`username` recebe o e-mail e `password` a senha). O endpoint retorna um bearer token JWT válido por 30 minutos. Envie-o no cabeçalho `Authorization: Bearer <token>`; `GET /auth/me` retorna o ID e o e-mail da conta autenticada.
 
 As senhas são armazenadas com hash Argon2. Configure `AUTH_SECRET_KEY` no ambiente do processo com uma chave aleatória de pelo menos 32 bytes. Gere uma com `openssl rand -hex 32`; mantenha o resultado fora do Git e nunca o compartilhe. Para carregar variáveis do `.env` local ao iniciar a API, use `uvicorn acervo_ia.main:app --reload --app-dir src --env-file .env`.
+
+Para criar uma conta local sem rota de cadastro público, execute `.venv/bin/python -m acervo_ia.cli`. O comando pede o e-mail e solicita a senha duas vezes sem exibi-la.
