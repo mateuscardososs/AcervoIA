@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from acervo_ia.api.routes.auth import router as auth_router
+from acervo_ia.api.routes.collections import router as collections_router
 from acervo_ia.api.routes.health import router as health_router
 
 app = FastAPI(
@@ -11,3 +12,4 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(collections_router)
