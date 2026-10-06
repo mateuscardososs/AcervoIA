@@ -33,6 +33,7 @@ def evaluate_in_session(
     from acervo_ia.services.answer_evaluation import (
         AnswerEvaluationRecord,
         calculate_answer_metrics,
+        make_question_diagnostic,
         source_matches_search_hit,
     )
     from acervo_ia.services.question_answering import (
@@ -98,6 +99,7 @@ def evaluate_in_session(
         records: dict[str, list[AnswerEvaluationRecord]] = {
             strategy: [] for strategy in STRATEGIES
         }
+        diagnostics: list[dict[str, object]] = []
         for question in questions:
             equipment = question["filters"]["model"]
             collection_id = collections[equipment].id
@@ -112,7 +114,33 @@ def evaluate_in_session(
                         limit=5,
                         strategy=strategy,
                     )
-                except InvalidModelAnswer:
+                except InvalidModelAnswer as error:
+                    latency_ms = (perf_counter() - started) * 1_000
+                    retrieved_hits = error.retrieved_hits
+                    expected_retrieved = any(
+                        section_by_chunk.get(hit.chunk_id) in expected
+                        for hit in retrieved_hits
+                    )
+                    diagnostics.append(
+                        make_question_diagnostic(
+                            question_id=str(question["id"]),
+                            mode=strategy,
+                            answerable=bool(question["answerable"]),
+                            expected_section_retrieved=(
+                                expected_retrieved
+                                if bool(question["answerable"])
+                                and error.search_completed
+                                else None
+                            ),
+                            expected_section_cited=False,
+                            sources_valid=None,
+                            correction_attempted=False,
+                            correction_failed=False,
+                            correct_abstention=False,
+                            latency_ms=latency_ms,
+                            error=True,
+                        )
+                    )
                     records[strategy].append(
                         AnswerEvaluationRecord(
                             answerable=bool(question["answerable"]),
@@ -123,18 +151,22 @@ def evaluate_in_session(
                             correct_abstention=False,
                             correction_failed=False,
                             error=True,
-                            latency_ms=(perf_counter() - started) * 1_000,
+                            latency_ms=latency_ms,
                         )
                     )
                     continue
 
                 latency_ms = (perf_counter() - started) * 1_000
-                sources_valid = all(
-                    source_matches_search_hit(source, answer.retrieved_hits)
-                    for source in answer.sources
+                sources_valid = (
+                    all(
+                        source_matches_search_hit(source, answer.retrieved_hits)
+                        for source in answer.sources
+                    )
+                    if answer.sources
+                    else False if answer.correction_failed else None
                 )
                 cited_sections: set[str] = set()
-                if sources_valid:
+                if sources_valid is True:
                     for source in answer.sources:
                         source_index = int(source.source_id[1:]) - 1
                         hit = answer.retrieved_hits[source_index]
@@ -142,18 +174,42 @@ def evaluate_in_session(
                         if section_label is not None:
                             cited_sections.add(section_label)
 
+                expected_retrieved = any(
+                    section_by_chunk.get(hit.chunk_id) in expected
+                    for hit in answer.retrieved_hits
+                )
+                expected_cited = bool(expected.intersection(cited_sections))
+                correct_abstention = (
+                    not bool(question["answerable"])
+                    and not answer.sources
+                    and answer.answer == NO_EVIDENCE_ANSWER
+                )
+                diagnostics.append(
+                    make_question_diagnostic(
+                        question_id=str(question["id"]),
+                        mode=strategy,
+                        answerable=bool(question["answerable"]),
+                        expected_section_retrieved=(
+                            expected_retrieved if bool(question["answerable"]) else None
+                        ),
+                        expected_section_cited=expected_cited,
+                        sources_valid=sources_valid,
+                        correction_attempted=answer.correction_attempted,
+                        correction_failed=answer.correction_failed,
+                        correct_abstention=correct_abstention,
+                        latency_ms=latency_ms,
+                        error=False,
+                    )
+                )
+
                 records[strategy].append(
                     AnswerEvaluationRecord(
                         answerable=bool(question["answerable"]),
                         expected_sections=expected,
                         cited_sections=frozenset(cited_sections),
                         source_count=len(answer.sources),
-                        sources_valid=sources_valid,
-                        correct_abstention=(
-                            not bool(question["answerable"])
-                            and not answer.sources
-                            and answer.answer == NO_EVIDENCE_ANSWER
-                        ),
+                        sources_valid=sources_valid is True,
+                        correct_abstention=correct_abstention,
                         correction_failed=answer.correction_failed,
                         error=False,
                         latency_ms=latency_ms,
@@ -168,6 +224,23 @@ def evaluate_in_session(
                 strategy: calculate_answer_metrics(records[strategy])
                 for strategy in STRATEGIES
             },
+            "diagnostic_counts": {
+                strategy: {
+                    category: sum(
+                        item["mode"] == strategy and item["category"] == category
+                        for item in diagnostics
+                    )
+                    for category in (
+                        "recovery_failure",
+                        "generation_failure",
+                        "execution_failure",
+                        "correct_abstention",
+                        "none",
+                    )
+                }
+                for strategy in STRATEGIES
+            },
+            "diagnostics": diagnostics,
         }
     finally:
         from acervo_ia.services.retrieval_evaluation import rollback_and_close

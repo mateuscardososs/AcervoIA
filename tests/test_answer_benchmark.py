@@ -11,6 +11,7 @@ from acervo_ia.services.question_answering import AnswerSource
 from acervo_ia.services.answer_evaluation import (
     AnswerEvaluationRecord,
     calculate_answer_metrics,
+    make_question_diagnostic,
     source_matches_search_hit,
 )
 from acervo_ia.services.semantic_search import SearchHit
@@ -97,6 +98,89 @@ def test_answer_metrics_reject_empty_input() -> None:
         calculate_answer_metrics([])
 
 
+@pytest.mark.parametrize(
+    ("answerable", "retrieved", "cited", "sources_valid", "abstained", "category"),
+    [
+        (True, False, False, True, False, "recovery_failure"),
+        (True, True, False, True, False, "generation_failure"),
+        (True, True, True, True, False, "none"),
+        (True, True, False, False, False, "generation_failure"),
+        (False, None, False, None, True, "correct_abstention"),
+        (False, None, False, None, False, "generation_failure"),
+    ],
+)
+def test_question_diagnostic_classifies_pipeline_stage_without_content(
+    answerable: bool,
+    retrieved: bool | None,
+    cited: bool,
+    sources_valid: bool | None,
+    abstained: bool,
+    category: str,
+) -> None:
+    diagnostic = make_question_diagnostic(
+        question_id="Q07",
+        mode="hybrid",
+        answerable=answerable,
+        expected_section_retrieved=retrieved,
+        expected_section_cited=cited,
+        sources_valid=sources_valid,
+        correction_attempted=True,
+        correction_failed=(category == "generation_failure"),
+        correct_abstention=abstained,
+        latency_ms=12.345,
+        error=False,
+    )
+
+    assert diagnostic == {
+        "question_id": "Q07",
+        "mode": "hybrid",
+        "category": category,
+        "expected_section_retrieved": retrieved,
+        "expected_section_cited": cited if answerable else None,
+        "sources_valid": sources_valid,
+        "correction_attempted": True,
+        "correction_failed": category == "generation_failure",
+        "latency_ms": 12.35,
+    }
+
+
+def test_question_diagnostic_rejects_non_synthetic_ids_and_modes() -> None:
+    safe = {
+        "answerable": True,
+        "expected_section_retrieved": False,
+        "expected_section_cited": False,
+        "sources_valid": False,
+        "correction_attempted": False,
+        "correction_failed": False,
+        "correct_abstention": False,
+        "latency_ms": 1,
+        "error": False,
+    }
+    with pytest.raises(ValueError):
+        make_question_diagnostic(question_id="customer@example.com", mode="vector", **safe)
+    with pytest.raises(ValueError):
+        make_question_diagnostic(question_id="Q01", mode="secret", **safe)
+
+
+def test_question_diagnostic_does_not_call_a_skipped_search_a_recovery_failure() -> None:
+    diagnostic = make_question_diagnostic(
+        question_id="Q08",
+        mode="vector",
+        answerable=True,
+        expected_section_retrieved=None,
+        expected_section_cited=False,
+        sources_valid=None,
+        correction_attempted=False,
+        correction_failed=False,
+        correct_abstention=False,
+        latency_ms=2,
+        error=True,
+    )
+
+    assert diagnostic["category"] == "execution_failure"
+    assert diagnostic["expected_section_retrieved"] is None
+
+
 def test_a_source_counts_only_when_its_id_and_metadata_match_a_real_search_hit() -> None:
     hit = SearchHit(
         chunk_id=UUID(int=1),
@@ -168,6 +252,43 @@ def test_shared_qa_service_reports_correction_failure_without_sources(
     assert answer.correction_failed is True
     assert answer.sources == ()
     assert answer.retrieved_hits == (hit,)
+
+
+def test_malformed_model_answer_retains_search_hits_for_safe_diagnosis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hit = SearchHit(
+        chunk_id=UUID(int=11),
+        document_id=UUID(int=12),
+        document_name="fictional.txt",
+        page_number=None,
+        position=0,
+        content="Fictional search result.",
+        score=0.8,
+    )
+    monkeypatch.setattr(
+        question_answering,
+        "search_text_chunks",
+        lambda *args, **kwargs: [hit],
+    )
+    monkeypatch.setattr(
+        question_answering,
+        "generate_chat_completion",
+        lambda _messages: "malformed private response",
+    )
+
+    with pytest.raises(question_answering.InvalidModelAnswer) as raised:
+        question_answering.answer_question(
+            None,
+            collection_id=UUID(int=13),
+            question="private question",
+            limit=5,
+            strategy="text",
+        )
+
+    assert raised.value.retrieved_hits == (hit,)
+    assert raised.value.search_completed is True
+    assert "private" not in str(raised.value)
 
 
 def test_answer_benchmark_rolls_back_seeded_rows_when_mode_fails(
@@ -246,6 +367,7 @@ def test_answer_benchmark_report_does_not_include_question_or_document_content(
         ],
         questions=[
             {
+                "id": "Q01",
                 "question": private_question,
                 "answerable": True,
                 "filters": {"model": "Orion B20"},
@@ -258,6 +380,12 @@ def test_answer_benchmark_report_does_not_include_question_or_document_content(
     serialized = json.dumps(report)
 
     assert report["question_count"] == 1
+    assert len(report["diagnostics"]) == 3
+    assert report["diagnostic_counts"]["vector"]["recovery_failure"] == 1
+    assert all(
+        item["category"] == "recovery_failure"
+        for item in report["diagnostics"]
+    )
     assert private_question not in serialized
     assert private_document not in serialized
     engine.dispose()

@@ -67,6 +67,11 @@ class Collection(Base):
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
+        UniqueConstraint(
+            "collection_id",
+            "content_sha256",
+            name="uq_documents_collection_content_sha256",
+        ),
         CheckConstraint(
             "processing_status IN ('pending', 'processing', 'completed', 'failed')",
             name="ck_documents_processing_status",
@@ -79,6 +84,7 @@ class Document(Base):
     )
     original_filename: Mapped[str] = mapped_column(Text)
     storage_key: Mapped[str] = mapped_column(String(32), unique=True)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     content_type: Mapped[str] = mapped_column(String(127))
     size_bytes: Mapped[int] = mapped_column(Integer)
     processing_status: Mapped[str] = mapped_column(

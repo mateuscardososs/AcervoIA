@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID
@@ -6,7 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -191,6 +192,203 @@ def test_upload_rejects_files_over_configured_size_limit(
 
     assert response.status_code == 413
     assert response.json() == {"detail": "O arquivo excede o limite permitido."}
+
+
+def test_upload_same_content_to_same_collection_reuses_document_and_file(
+    document_client: TestClient,
+) -> None:
+    _, collection_id, token = create_user_and_collection("dedupe@example.test")
+    headers = {"Authorization": f"Bearer {token}"}
+    content = b"Identical document bytes"
+
+    first = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("first.txt", content, "text/plain")},
+        headers=headers,
+    )
+    second = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("renamed.txt", content, "text/plain")},
+        headers=headers,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["original_filename"] == "first.txt"
+    with app.state.test_session_factory() as session:
+        stored = session.scalars(
+            select(Document).where(Document.collection_id == collection_id)
+        ).all()
+        assert len(stored) == 1
+        assert stored[0].content_sha256 == sha256(content).hexdigest()
+    assert len(list(documents.DOCUMENT_STORAGE_DIRECTORY.iterdir())) == 1
+
+
+def test_upload_different_content_to_same_collection_creates_another_document(
+    document_client: TestClient,
+) -> None:
+    _, collection_id, token = create_user_and_collection("different@example.test")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("first.txt", b"First content", "text/plain")},
+        headers=headers,
+    )
+    second = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("second.txt", b"Second content", "text/plain")},
+        headers=headers,
+    )
+
+    assert first.status_code == second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
+    with app.state.test_session_factory() as session:
+        stored = session.scalars(
+            select(Document).where(Document.collection_id == collection_id)
+        ).all()
+    assert len(stored) == 2
+    assert len({document.content_sha256 for document in stored}) == 2
+
+
+def test_upload_same_content_to_different_users_is_not_shared(
+    document_client: TestClient,
+) -> None:
+    _, first_collection, first_token = create_user_and_collection(
+        "first-owner@example.test"
+    )
+    _, second_collection, second_token = create_user_and_collection(
+        "second-owner@example.test"
+    )
+    content = b"Same bytes, separate collection ownership"
+
+    first = document_client.post(
+        f"/collections/{first_collection}/documents",
+        files={"file": ("manual.txt", content, "text/plain")},
+        headers={"Authorization": f"Bearer {first_token}"},
+    )
+    second = document_client.post(
+        f"/collections/{second_collection}/documents",
+        files={"file": ("manual.txt", content, "text/plain")},
+        headers={"Authorization": f"Bearer {second_token}"},
+    )
+
+    assert first.status_code == second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
+    assert len(list(documents.DOCUMENT_STORAGE_DIRECTORY.iterdir())) == 2
+    assert [item["id"] for item in document_client.get(
+        f"/collections/{first_collection}/documents",
+        headers={"Authorization": f"Bearer {first_token}"},
+    ).json()] == [first.json()["id"]]
+    assert [item["id"] for item in document_client.get(
+        f"/collections/{second_collection}/documents",
+        headers={"Authorization": f"Bearer {second_token}"},
+    ).json()] == [second.json()["id"]]
+
+
+def test_upload_duplicate_of_legacy_document_backfills_its_content_hash(
+    document_client: TestClient,
+) -> None:
+    _, collection_id, token = create_user_and_collection("legacy@example.test")
+    content = b"Existing document without a hash"
+    storage_key = "b" * 32
+    (documents.DOCUMENT_STORAGE_DIRECTORY).mkdir(parents=True, exist_ok=True)
+    (documents.DOCUMENT_STORAGE_DIRECTORY / storage_key).write_bytes(content)
+    with app.state.test_session_factory() as session:
+        existing = Document(
+            collection_id=collection_id,
+            original_filename="legacy.txt",
+            storage_key=storage_key,
+            content_type="text/plain",
+            size_bytes=len(content),
+            content_sha256=None,
+        )
+        session.add(existing)
+        session.commit()
+        existing_id = existing.id
+
+    response = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("new-name.txt", content, "text/plain")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(existing_id)
+    with app.state.test_session_factory() as session:
+        backfilled = session.get(Document, existing_id)
+        assert backfilled is not None
+        assert len(backfilled.content_sha256) == 64
+    assert len(list(documents.DOCUMENT_STORAGE_DIRECTORY.iterdir())) == 1
+
+
+def test_concurrent_duplicate_insert_returns_winner_and_removes_losing_file(
+    document_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_user_and_collection("race@example.test")
+    headers = {"Authorization": f"Bearer {token}"}
+    content = b"Concurrent identical content"
+    winner = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("winner.txt", content, "text/plain")},
+        headers=headers,
+    )
+    real_lookup = getattr(documents, "_find_document_by_content_hash", None)
+    assert real_lookup is not None
+    lookup_calls = 0
+
+    def miss_first_lookup(session: Session, scoped_collection_id: UUID, digest: str):
+        nonlocal lookup_calls
+        lookup_calls += 1
+        if lookup_calls == 1:
+            return None
+        return real_lookup(session, scoped_collection_id, digest)
+
+    monkeypatch.setattr(
+        documents,
+        "_find_document_by_content_hash",
+        miss_first_lookup,
+    )
+    losing_race = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("racer.txt", content, "text/plain")},
+        headers=headers,
+    )
+
+    assert winner.status_code == 201
+    assert losing_race.status_code == 200
+    assert losing_race.json()["id"] == winner.json()["id"]
+    assert lookup_calls == 2
+    assert len(list(documents.DOCUMENT_STORAGE_DIRECTORY.iterdir())) == 1
+
+
+def test_database_failure_does_not_leave_uploaded_file_or_document(
+    document_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    _, collection_id, token = create_user_and_collection("db-failure@example.test")
+
+    def fail_commit(_session: Session) -> None:
+        raise SQLAlchemyError("private database connection details")
+
+    monkeypatch.setattr(Session, "commit", fail_commit)
+    response = document_client.post(
+        f"/collections/{collection_id}/documents",
+        files={"file": ("failed.txt", b"temporary file", "text/plain")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 503
+    assert "private database" not in response.text
+    assert not documents.DOCUMENT_STORAGE_DIRECTORY.exists() or not list(
+        documents.DOCUMENT_STORAGE_DIRECTORY.iterdir()
+    )
+    with app.state.test_session_factory() as session:
+        assert session.scalar(select(Document)) is None
 
 
 def test_storage_key_collision_does_not_delete_existing_file(

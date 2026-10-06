@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated
@@ -17,7 +18,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from acervo_ia.config import (
@@ -130,16 +131,135 @@ def _store_content(storage_key: str, content: bytes) -> Path:
     return path
 
 
+def _find_document_by_content_hash(
+    session: Session,
+    collection_id: UUID,
+    content_sha256: str,
+) -> Document | None:
+    return session.scalar(
+        select(Document).where(
+            Document.collection_id == collection_id,
+            Document.content_sha256 == content_sha256,
+        )
+    )
+
+
+def _find_legacy_document_by_content(
+    session: Session,
+    collection_id: UUID,
+    content_sha256: str,
+    content: bytes,
+) -> Document | None:
+    """Hash same-size legacy files lazily so pre-migration rows also deduplicate."""
+    legacy_documents = session.scalars(
+        select(Document)
+        .where(
+            Document.collection_id == collection_id,
+            Document.content_sha256.is_(None),
+            Document.size_bytes == len(content),
+        )
+        .order_by(Document.created_at, Document.id)
+    ).all()
+    for document in legacy_documents:
+        try:
+            legacy_path = _safe_storage_path(document.storage_key)
+            if legacy_path.stat().st_size != len(content):
+                continue
+            legacy_content = legacy_path.read_bytes()
+        except (HTTPException, OSError):
+            continue
+
+        if sha256(legacy_content).hexdigest() != content_sha256:
+            continue
+
+        document.content_sha256 = content_sha256
+        try:
+            session.commit()
+        except IntegrityError:
+            try:
+                session.rollback()
+                winner = _find_document_by_content_hash(
+                    session,
+                    collection_id,
+                    content_sha256,
+                )
+            except SQLAlchemyError:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Não foi possível concluir o upload do arquivo.",
+                ) from None
+            if winner is not None:
+                return winner
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Não foi possível concluir o upload do arquivo.",
+            ) from None
+        except SQLAlchemyError:
+            try:
+                session.rollback()
+            except SQLAlchemyError:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Não foi possível concluir o upload do arquivo.",
+            ) from None
+        return document
+    return None
+
+
+def _find_existing_document(
+    session: Session,
+    collection_id: UUID,
+    content_sha256: str,
+    content: bytes,
+) -> Document | None:
+    existing = _find_document_by_content_hash(
+        session,
+        collection_id,
+        content_sha256,
+    )
+    if existing is not None:
+        return existing
+    return _find_legacy_document_by_content(
+        session,
+        collection_id,
+        content_sha256,
+        content,
+    )
+
+
+def _discard_stored_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _return_existing_document(
+    document: Document,
+    response: Response,
+) -> DocumentResponse:
+    response.status_code = status.HTTP_200_OK
+    return DocumentResponse.model_validate(document)
+
+
 @router.post(
     "/{collection_id}/documents",
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_200_OK: {
+            "model": DocumentResponse,
+            "description": "Documento existente reutilizado por conteúdo idêntico.",
+        }
+    },
 )
 def upload_document(
     collection_id: UUID,
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     file: Annotated[UploadFile, File()],
+    response: Response,
 ) -> DocumentResponse:
     collection = _get_owned_collection(collection_id, user, session)
     filename = file.filename
@@ -170,24 +290,68 @@ def upload_document(
             detail="O arquivo não é válido ou não é aceito.",
         )
 
+    content_sha256 = sha256(content).hexdigest()
+    try:
+        existing = _find_existing_document(
+            session,
+            collection.id,
+            content_sha256,
+            content,
+        )
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Não foi possível concluir o upload do arquivo.",
+        ) from None
+    if existing is not None:
+        return _return_existing_document(existing, response)
+
     storage_key = uuid4().hex
     stored_path = _store_content(storage_key, content)
     document = Document(
         collection_id=collection.id,
         original_filename=filename,
         storage_key=storage_key,
+        content_sha256=content_sha256,
         content_type=DOCUMENT_FORMATS[extension],
         size_bytes=len(content),
     )
     session.add(document)
     try:
         session.commit()
+    except IntegrityError:
+        try:
+            session.rollback()
+        except SQLAlchemyError:
+            pass
+        _discard_stored_file(stored_path)
+        try:
+            duplicate = _find_document_by_content_hash(
+                session,
+                collection.id,
+                content_sha256,
+            )
+        except SQLAlchemyError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Não foi possível concluir o upload do arquivo.",
+            ) from None
+        if duplicate is not None:
+            return _return_existing_document(duplicate, response)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Não foi possível concluir o upload do arquivo.",
+        ) from None
     except SQLAlchemyError:
         try:
-            stored_path.unlink(missing_ok=True)
-        except OSError:
+            session.rollback()
+        except SQLAlchemyError:
             pass
-        raise
+        _discard_stored_file(stored_path)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Não foi possível concluir o upload do arquivo.",
+        ) from None
     session.refresh(document)
     return DocumentResponse.model_validate(document)
 

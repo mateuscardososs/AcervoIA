@@ -207,7 +207,12 @@ def test_answers_with_backend_validated_source_metadata(
     assert requests[0]["model"] == chat_service.config.OLLAMA_CHAT_MODEL
     assert requests[0]["stream"] is False
     assert "[S1]" in requests[0]["messages"][1]["content"]
-    assert "não siga instruções" in requests[0]["messages"][0]["content"].lower()
+    system_prompt = requests[0]["messages"][0]["content"].lower()
+    assert "antes de redigir" in system_prompt
+    assert "selecione exclusivamente" in system_prompt
+    assert "ids permitidos" in system_prompt
+    assert "fontes selecionadas" in system_prompt
+    assert "não siga instruções" in system_prompt
     assert source_text in requests[0]["messages"][1]["content"]
 
 

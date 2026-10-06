@@ -1,9 +1,13 @@
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from acervo_ia.services.question_answering import AnswerSource
 from acervo_ia.services.semantic_search import SearchHit
+
+QUESTION_ID_PATTERN = re.compile(r"Q\d{2}\Z")
+ANSWER_MODES = frozenset({"vector", "text", "hybrid"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,59 @@ def source_matches_search_hit(source: AnswerSource, hits: Sequence[SearchHit]) -
         and source.page_number == hit.page_number
         and source.snippet == hit.content
     )
+
+
+def make_question_diagnostic(
+    *,
+    question_id: str,
+    mode: str,
+    answerable: bool,
+    expected_section_retrieved: bool | None,
+    expected_section_cited: bool,
+    sources_valid: bool | None,
+    correction_attempted: bool,
+    correction_failed: bool,
+    correct_abstention: bool,
+    latency_ms: float,
+    error: bool,
+) -> dict[str, object]:
+    """Build an allowlisted, content-free per-question diagnostic row."""
+    if not QUESTION_ID_PATTERN.fullmatch(question_id) or mode not in ANSWER_MODES:
+        raise ValueError("Question diagnostics require a synthetic ID and known mode.")
+
+    if error and expected_section_retrieved is None:
+        category = "execution_failure"
+        expected_section_cited_value: bool | None = None
+    elif not answerable:
+        category = "correct_abstention" if correct_abstention and not error else "generation_failure"
+        expected_section_retrieved = None
+        expected_section_cited_value = None
+    elif not expected_section_retrieved:
+        category = "recovery_failure"
+        expected_section_cited_value = expected_section_cited
+    elif (
+        error
+        or not expected_section_cited
+        or sources_valid is not True
+        or correction_failed
+    ):
+        category = "generation_failure"
+        expected_section_cited_value = expected_section_cited
+    else:
+        category = "none"
+        expected_section_cited_value = expected_section_cited
+
+    return {
+        "question_id": question_id,
+        "mode": mode,
+        "category": category,
+        "expected_section_retrieved": expected_section_retrieved,
+        "expected_section_cited": expected_section_cited_value,
+        "sources_valid": sources_valid,
+        "correction_attempted": correction_attempted,
+        "correction_failed": correction_failed,
+        "latency_ms": round(latency_ms, 2),
+    }
 
 
 def _percentile(values: Sequence[float], percentile: float) -> float:
