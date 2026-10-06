@@ -1,5 +1,7 @@
 # Escopo da primeira entrega
 
+> **Nota histórica:** este documento descreve o recorte original da primeira etapa de planejamento, não o estado atual do produto. Parte dos itens listados como futuros foi implementada desde então; consulte o [README](../README.md) para a visão atual e os limites conhecidos.
+
 ## Problema
 
 Encontrar instruções em vários manuais é lento e pode levar à consulta de um modelo ou versão diferente. O AcervoIA deve responder somente com base nos documentos selecionados, mostrar os trechos usados e admitir quando não houver evidência suficiente.
