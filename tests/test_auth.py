@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from acervo_ia.db.connection import get_db
 from acervo_ia.db.models import Base, User
 from acervo_ia.main import app
-from acervo_ia.security import hash_password
+from acervo_ia.security import create_access_token, hash_password
 
 
 @pytest.fixture
@@ -143,3 +143,47 @@ def test_password_hash_is_not_the_plaintext(
     assert user is not None
     assert user.password_hash != password
     assert user.password_hash.startswith("$argon2")
+
+
+def test_login_fails_safely_when_auth_secret_is_unavailable(
+    auth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    email = "configured-user@example.test"
+    password = "sentinel-password-not-for-logs"
+    create_test_user(email, password)
+    monkeypatch.delenv("AUTH_SECRET_KEY")
+
+    with caplog.at_level("ERROR"):
+        response = auth_client.post(
+            "/auth/token",
+            data={"username": email, "password": password},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Autenticação indisponível temporariamente."
+    }
+    assert password not in response.text
+    assert password not in caplog.text
+
+
+def test_authenticated_route_fails_safely_when_auth_secret_is_unavailable(
+    auth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = create_test_user("configured-user@example.test", "safe password")
+    token = create_access_token(str(user_id))
+    monkeypatch.delenv("AUTH_SECRET_KEY")
+
+    response = auth_client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Autenticação indisponível temporariamente."
+    }
+    assert token not in response.text

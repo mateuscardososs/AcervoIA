@@ -15,6 +15,11 @@ from acervo_ia.db.models import User
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+AUTH_UNAVAILABLE_DETAIL = "Autenticação indisponível temporariamente."
+
+
+class AuthenticationConfigurationError(RuntimeError):
+    """Indicates that token signing cannot be used with the current configuration."""
 
 password_hash = PasswordHash.recommended()
 dummy_password_hash = password_hash.hash("invalid-user-password-check")
@@ -32,7 +37,9 @@ def verify_password(password: str, hashed_password: str) -> bool:
 def get_auth_secret() -> str:
     secret = os.getenv("AUTH_SECRET_KEY")
     if secret is None or len(secret.encode("utf-8")) < 32:
-        raise RuntimeError("AUTH_SECRET_KEY precisa ter pelo menos 32 bytes.")
+        raise AuthenticationConfigurationError(
+            "AUTH_SECRET_KEY precisa ter pelo menos 32 bytes."
+        )
     return secret
 
 
@@ -67,6 +74,11 @@ def get_current_user(
         subject = payload.get("sub")
         if isinstance(subject, str):
             user_id = UUID(subject)
+    except AuthenticationConfigurationError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AUTH_UNAVAILABLE_DETAIL,
+        ) from None
     except (InvalidTokenError, ValueError):
         pass
 
