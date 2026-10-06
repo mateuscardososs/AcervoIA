@@ -13,8 +13,8 @@ CHUNK_SIZE_CHARS = 1_000
 CHUNK_OVERLAP_CHARS = 150
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma")
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5:3b")
 EMBEDDING_DIMENSIONS = 768
 OLLAMA_TIMEOUT_SECONDS = 60.0
-DOCUMENT_STORAGE_DIRECTORY = (
-    Path(__file__).resolve().parents[2] / "data" / "uploads"
-)
+OLLAMA_CHAT_TIMEOUT_SECONDS = 120.0
+DOCUMENT_STORAGE_DIRECTORY = Path(__file__).resolve().parents[2] / "data" / "uploads"

@@ -338,7 +338,7 @@ def test_semantic_search_returns_matching_chunks_and_metadata(
     monkeypatch.setattr(embedding_routes, "search_chunks", fake_search)
     response = embeddings_client.post(
         f"/collections/{collection_id}/search",
-        json={"query": "consulta", "limit": 3},
+        json={"query": "consulta", "limit": 3, "strategy": "vector"},
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -423,3 +423,94 @@ def test_similarity_query_uses_pgvector_cosine_distance() -> None:
 
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert "<=>" in sql
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected_search"),
+    [
+        ("text", "search_text_chunks"),
+        ("vector", "search_chunks"),
+        ("hybrid", "search_hybrid_chunks"),
+    ],
+)
+def test_search_strategy_dispatch_and_text_does_not_call_ollama(
+    embeddings_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+    expected_search: str,
+) -> None:
+    _, collection_id, _, token = create_owned_document()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        embedding_routes,
+        "_generate",
+        lambda texts: calls.append("embedding") or [[0.0] * 768],
+    )
+    for name in ("search_text_chunks", "search_chunks", "search_hybrid_chunks"):
+        monkeypatch.setattr(
+            embedding_routes,
+            name,
+            lambda *args, _name=name, **kwargs: calls.append(_name) or [],
+        )
+
+    response = embeddings_client.post(
+        f"/collections/{collection_id}/search",
+        json={"query": "E-17 Orion B20", "strategy": strategy},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert calls[-1] == expected_search
+    assert ("embedding" in calls) is (strategy != "text")
+
+
+def test_search_defaults_to_hybrid(
+    embeddings_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, _, token = create_owned_document()
+    calls: list[str] = []
+    monkeypatch.setattr(embedding_routes, "_generate", lambda _: [[0.0] * 768])
+    monkeypatch.setattr(
+        embedding_routes,
+        "search_hybrid_chunks",
+        lambda *args, **kwargs: calls.append("hybrid") or [],
+    )
+
+    response = embeddings_client.post(
+        f"/collections/{collection_id}/search",
+        json={"query": "alimentação"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["hybrid"]
+
+
+@pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
+def test_other_user_cannot_search_any_strategy_before_retrieval(
+    embeddings_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    _, collection_id, _, _ = create_owned_document("owner@example.test")
+    with app.state.test_session_factory() as session:
+        other = User(email="other@example.test", password_hash="unused")
+        session.add(other)
+        session.commit()
+        other_token = create_access_token(str(other.id))
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("A busca ocorreu antes da validação de propriedade")
+
+    monkeypatch.setattr(embedding_routes, "_generate", forbidden)
+    monkeypatch.setattr(embedding_routes, "search_text_chunks", forbidden)
+    monkeypatch.setattr(embedding_routes, "search_chunks", forbidden)
+    monkeypatch.setattr(embedding_routes, "search_hybrid_chunks", forbidden)
+    response = embeddings_client.post(
+        f"/collections/{collection_id}/search",
+        json={"query": "E-17", "strategy": strategy},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404

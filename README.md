@@ -49,4 +49,20 @@ Para criar uma conta local sem rota de cadastro público, execute `.venv/bin/pyt
 
 O PostgreSQL do Compose usa a imagem `pgvector/pgvector`; após aplicar as migrações, cada trecho pode guardar um vetor de 768 dimensões e o nome do modelo que o gerou. A configuração padrão usa o Ollama local em `http://127.0.0.1:11434` e o modelo `embeddinggemma` (Ollama 0.11.10 ou superior). Inicie o Ollama, baixe o modelo com `ollama pull embeddinggemma` e configure `OLLAMA_BASE_URL` ou `OLLAMA_EMBEDDING_MODEL` no ambiente da API se necessário. A dimensão do modelo precisa continuar em 768 nesta versão; mudar essa dimensão exige uma migração de banco correspondente.
 
-No `/docs`, autentique-se com o botão **Authorize** usando o token obtido em `POST /auth/token`. Crie uma coleção e envie um PDF, DOCX ou TXT pela rota de documentos. Processe-o em `POST /collections/{collection_id}/documents/{document_id}/process`; depois gere ou atualize um vetor por trecho em `POST /collections/{collection_id}/documents/{document_id}/embeddings`. Por fim, envie `{ "query": "sua pergunta", "limit": 5 }` para `POST /collections/{collection_id}/search`. A busca retorna os trechos ordenados por similaridade cosseno, nome do documento, página quando disponível e pontuação. Esta etapa só recupera evidências; não gera resposta com modelo de chat. As rotas verificam a propriedade da coleção pelo usuário autenticado.
+No `/docs`, autentique-se com o botão **Authorize** usando o token obtido em `POST /auth/token`. Crie uma coleção e envie um PDF, DOCX ou TXT pela rota de documentos. Processe-o em `POST /collections/{collection_id}/documents/{document_id}/process`; depois gere ou atualize um vetor por trecho em `POST /collections/{collection_id}/documents/{document_id}/embeddings`. Por fim, envie `{ "query": "sua pergunta", "limit": 5 }` para `POST /collections/{collection_id}/search`. A estratégia padrão é híbrida; o campo opcional `strategy` permite escolher `vector`, `text` ou `hybrid`. A resposta inclui nome do documento, página quando disponível e pontuação. Esta etapa só recupera evidências; não gera resposta com modelo de chat. As rotas verificam a propriedade da coleção pelo usuário autenticado.
+
+Para perguntas com resposta fundamentada, configure `OLLAMA_CHAT_MODEL` (padrão `qwen2.5:3b`) e baixe esse modelo no Ollama, por exemplo `ollama pull qwen2.5:3b`. Depois de processar e vetorizar os documentos, use `POST /collections/{collection_id}/ask` no `/docs` com `{ "question": "Como calibro o equipamento?", "limit": 5 }`. A resposta contém marcadores `[S1]` e a lista `sources` com documento, página quando disponível e trecho, montada pelo backend. Se nenhum trecho for recuperado, a API informa que não há evidência suficiente sem chamar o modelo de chat. Respostas com fontes desconhecidas ou não citadas são rejeitadas.
+
+### Estratégias de busca e benchmark
+
+`POST /collections/{collection_id}/search` aceita `strategy`: `vector`, `text` ou `hybrid`; o padrão é `hybrid`. A busca textual combina full-text search do PostgreSQL (configuração `simple`, índice GIN) com correspondência literal normalizada de códigos, siglas e modelos, usando Reciprocal Rank Fusion (RRF). A busca híbrida combina os rankings textual e vetorial por RRF. O `/ask` também usa a busca híbrida. Os três modos validam primeiro a propriedade da coleção; `text` não precisa chamar o Ollama de embeddings.
+
+Após iniciar PostgreSQL e Ollama, instalar o modelo configurado e aplicar as migrações com `.venv/bin/alembic upgrade head`, execute a avaliação reproduzível:
+
+```bash
+.venv/bin/python scripts/evaluate_retrieval.py
+```
+
+O comando reutiliza os manuais fictícios e as 30 perguntas de `data/demo/`. Gera embeddings com o Ollama configurado e executa as três estratégias no PostgreSQL local. Usuário, coleções, documentos, trechos e vetores da avaliação ficam em uma única transação que é sempre revertida; nada do benchmark é persistido. Os testes automatizados simulam o provedor e não precisam do Ollama: `.venv/bin/python -m pytest`.
+
+O resultado de referência da execução local de 2026-10-05 está registrado em [`docs/avaliacao-inicial.md`](docs/avaliacao-inicial.md). É um diagnóstico dos 25 exemplos respondíveis, não uma alegação de qualidade geral; a métrica não mede a qualidade de respostas geradas.

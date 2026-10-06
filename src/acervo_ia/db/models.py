@@ -5,12 +5,14 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
+    literal_column,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -131,3 +133,10 @@ class DocumentChunk(Base):
     embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
+
+
+Index(
+    "ix_document_chunks_content_fts",
+    func.to_tsvector(literal_column("'simple'"), DocumentChunk.content),
+    postgresql_using="gin",
+).ddl_if(dialect="postgresql")
