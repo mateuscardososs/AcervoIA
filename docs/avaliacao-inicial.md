@@ -28,6 +28,24 @@ Nesta amostra e nesta execução, a busca vetorial teve as maiores métricas de 
 
 Para executar novamente: iniciar o PostgreSQL do Compose e o Ollama local, garantir disponível o modelo `OLLAMA_EMBEDDING_MODEL` (padrão `embeddinggemma`), aplicar `.venv/bin/alembic upgrade head` e rodar `.venv/bin/python scripts/evaluate_retrieval.py`. Os testes (`.venv/bin/python -m pytest`) simulam Ollama e não exigem que ele esteja ativo.
 
+## Benchmark de respostas ponta a ponta
+
+O comando `.venv/bin/python scripts/evaluate_answers.py` executa o serviço compartilhado pelo endpoint `/ask` para as 30 perguntas, em `vector`, `text` e `hybrid`, usando PostgreSQL/pgvector e o Ollama local. A lista `modes` do relatório apresenta contagens por modo: abstenções corretas para perguntas sem evidência, respostas com fontes pertencentes aos hits reais (ID e metadados conferidos pelo benchmark), respostas às perguntas respondíveis que citam seção esperada, falhas após a única correção, fontes inválidas, erros de formato do modelo e latência média/p95.
+
+Uma resposta com fonte esperada não equivale a uma avaliação semântica do texto gerado: o benchmark confirma proveniência e alinhamento com a seção anotada, mas não avalia paráfrase, completude ou segurança operacional da resposta. Os cinco casos sem evidência são uma amostra pequena para medir abstenção. O relatório não inclui perguntas, documentos, trechos, saídas brutas do modelo, credenciais ou valores de configuração. Se PostgreSQL ou Ollama falhar, o comando retorna um código de erro e mensagem genérica sem apresentar os resultados parciais como aprovação. Usuários, coleções, documentos e trechos ficam numa única transação revertida em `finally`.
+
+### Execução observada em 2026-10-06
+
+Uma execução com PostgreSQL local, `embeddinggemma` e `qwen3:4b-instruct-2507-q4_K_M` produziu os seguintes agregados nos 30 itens (25 respondíveis, 5 sem evidência):
+
+| Modo | Abstenções corretas (de 5) | Respostas com fontes válidas (de 30) | Respondíveis com fonte esperada (de 25) | Falha após correção | Latência média / p95 |
+|---|---:|---:|---:|---:|---:|
+| vector | 5 (100%) | 17 | 17 | 5 | 5,75 s / 12,69 s |
+| text | 5 (100%) | 7 | 7 | 2 | 2,48 s / 9,62 s |
+| hybrid | 5 (100%) | 14 | 14 | 6 | 4,48 s / 11,21 s |
+
+Não houve fontes inválidas aceitas nem erros de formato nessa execução. As falhas após correção indicam respostas cuja segunda tentativa ainda não validou as referências; o backend omitiu suas fontes. Os valores são de uma única execução local, em corpus sintético pequeno, dependente dos modelos e do hardware usados; não estabelecem superioridade geral nem correção semântica das respostas.
+
 ## Critérios de aceite da recuperação
 
 - Para pergunta com filtro de modelo, nenhum resultado do outro modelo aparece como fonte autorizada.

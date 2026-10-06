@@ -44,10 +44,12 @@ export function AskPage() {
       setAnswer(await api.ask(collectionId, question.trim(), strategy));
     } catch (cause) {
       setError(cause instanceof ApiError && cause.status === 503
-        ? "Ollama indisponível. Inicie o serviço local e confira os modelos de embeddings e chat."
-        : cause instanceof ApiError && cause.status === 401
-          ? "Sua sessão expirou. Entre novamente para continuar."
-          : "Não foi possível consultar os documentos desta coleção. Tente novamente.");
+        ? "O serviço local de IA (Ollama) está indisponível. Confira se está em execução e se os modelos configurados de embeddings e chat foram instalados."
+        : cause instanceof ApiError && cause.status === 502
+          ? "A resposta do modelo não pôde ser validada. Nenhuma fonte foi exibida; tente novamente ou reformule a pergunta."
+          : cause instanceof ApiError && cause.status === 401
+            ? "Sua sessão expirou. Entre novamente para continuar."
+            : "Não foi possível consultar os documentos desta coleção. Tente novamente.");
     } finally {
       setAsking(false);
     }
@@ -124,7 +126,7 @@ export function AskPage() {
               </div>
             </div>
           ) : (
-            <p className="no-sources-note" role="status">Nenhum trecho foi retornado para esta pergunta. Tente outro termo ou confira os documentos processados.</p>
+            <p className="no-sources-note" role="status">Nenhuma fonte validada foi retornada para esta pergunta. Tente outro termo ou confira os documentos processados.</p>
           )}
         </section>
       )}

@@ -67,6 +67,18 @@ O comando reutiliza os manuais fictícios e as 30 perguntas de `data/demo/`. Ger
 
 O resultado de referência da execução local de 2026-10-05 está registrado em [`docs/avaliacao-inicial.md`](docs/avaliacao-inicial.md). É um diagnóstico dos 25 exemplos respondíveis, não uma alegação de qualidade geral; a métrica não mede a qualidade de respostas geradas.
 
+### Benchmark de respostas ponta a ponta
+
+Com PostgreSQL/pgvector e Ollama disponíveis, migrações aplicadas e modelos locais configurados instalados, execute:
+
+```bash
+.venv/bin/python scripts/evaluate_answers.py
+```
+
+O comando reutiliza os mesmos 14 trechos fictícios e as 30 perguntas do benchmark de recuperação e executa o serviço compartilhado pelo `/ask` nos modos `vector`, `text` e `hybrid`. O JSON contém apenas métricas agregadas por modo: abstenções corretas nas cinco perguntas sem evidência, respostas com fontes válidas (IDs e metadados correspondentes aos hits reais daquela busca), respostas às perguntas respondíveis que citam ao menos uma seção esperada, falhas depois da tentativa única de correção, respostas inválidas, outros erros e latência média/p95. “Fonte esperada” mede recuperação/citação da seção rotulada, não julga se o texto da resposta é semanticamente correto.
+
+Os registros temporários de usuário, coleções, documentos e trechos são sempre revertidos, inclusive se uma consulta falhar. Perguntas, conteúdo documental, respostas brutas, credenciais e configuração não são impressos. Se PostgreSQL ou Ollama estiver indisponível, o comando termina com código diferente de zero e uma mensagem genérica específica do serviço; nenhum relatório de sucesso é produzido. Como a amostra tem apenas 25 perguntas respondíveis e cinco sem evidência, baseada em dois manuais inventados, os resultados são indicativos e não demonstram qualidade geral.
+
 ## Interface web
 
 A SPA React/TypeScript fica em `web/`. O Vite serve a interface em `http://127.0.0.1:5173` e encaminha `/api` para a API local em `http://127.0.0.1:8000`; para outro destino de desenvolvimento, configure `VITE_DEV_API_TARGET` no ambiente do Vite. O navegador guarda o bearer token somente em `sessionStorage`; a API continua responsável por autenticar cada requisição e filtrar coleções e documentos pela conta do token.

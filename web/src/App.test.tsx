@@ -228,4 +228,23 @@ describe("AcervoIA web flows", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/Ollama/i);
     expect(screen.queryByText(/Traceback|stack trace/i)).not.toBeInTheDocument();
   });
+
+  it("explains an invalid model response without presenting unverified sources", async () => {
+    authenticate();
+    installFetch((path) => {
+      if (path === "/auth/me") return jsonResponse(user);
+      if (path === "/collections/c-1") return jsonResponse(collection);
+      if (path === "/collections/c-1/ask") {
+        return jsonResponse({ detail: "internal model output" }, 502);
+      }
+      return jsonResponse({ detail: "not found" }, 404);
+    });
+    const actor = userEvent.setup();
+    mount("/collections/c-1/ask");
+    await actor.type(await screen.findByLabelText("Sua pergunta"), "Qual alimentação?");
+    await actor.click(screen.getByRole("button", { name: "Perguntar" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/não pôde ser validada/i);
+    expect(screen.queryByText(/internal model output/i)).not.toBeInTheDocument();
+  });
 });
