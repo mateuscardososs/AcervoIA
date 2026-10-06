@@ -129,11 +129,21 @@ def mock_retrieval(
         calls.append({"texts": texts, **kwargs})
         return [[0.0] * 768]
 
+    def search_vector(*args: Any, **kwargs: Any) -> list[SearchHit]:
+        calls.append({"strategy": "vector", **kwargs})
+        return hits
+
+    def search_text(*args: Any, **kwargs: Any) -> list[SearchHit]:
+        calls.append({"strategy": "text", **kwargs})
+        return hits
+
     def search_hybrid_chunks(*args: Any, **kwargs: Any) -> list[SearchHit]:
-        calls.append(kwargs)
+        calls.append({"strategy": "hybrid", **kwargs})
         return hits
 
     monkeypatch.setattr(qa_routes, "generate_embeddings", generate_embeddings)
+    monkeypatch.setattr(qa_routes, "search_chunks", search_vector)
+    monkeypatch.setattr(qa_routes, "search_text_chunks", search_text)
     monkeypatch.setattr(qa_routes, "search_hybrid_chunks", search_hybrid_chunks)
     return calls
 
@@ -157,7 +167,7 @@ def test_answers_with_backend_validated_source_metadata(
 
     response = qa_client.post(
         f"/collections/{collection_id}/ask",
-        json={"question": "Como calibro o equipamento?"},
+        json={"question": "Como calibro o equipamento?", "strategy": "hybrid"},
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -286,12 +296,88 @@ def test_other_users_cannot_search_or_generate_answers_for_collection(
 
     monkeypatch.setattr(qa_routes, "generate_embeddings", forbidden)
     monkeypatch.setattr(qa_routes, "search_hybrid_chunks", forbidden)
+    monkeypatch.setattr(qa_routes, "search_chunks", forbidden)
+    monkeypatch.setattr(qa_routes, "search_text_chunks", forbidden)
     monkeypatch.setattr(qa_routes, "generate_chat_completion", forbidden)
 
     response = qa_client.post(
         f"/collections/{collection_id}/ask",
         json={"question": "Conteúdo privado?"},
         headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_strategy", "uses_embeddings"),
+    [
+        ({"question": "Pergunta?"}, "vector", True),
+        ({"question": "Pergunta?", "strategy": "vector"}, "vector", True),
+        ({"question": "Pergunta?", "strategy": "text"}, "text", False),
+        ({"question": "Pergunta?", "strategy": "hybrid"}, "hybrid", True),
+    ],
+)
+def test_ask_selects_requested_strategy_and_defaults_to_vector(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, str],
+    expected_strategy: str,
+    uses_embeddings: bool,
+) -> None:
+    _, collection_id, token = create_collection()
+    calls: list[str] = []
+    embedding_calls: list[list[str]] = []
+
+    def generate(texts: list[str], **kwargs: Any) -> list[list[float]]:
+        embedding_calls.append(texts)
+        return [[0.0] * 768]
+
+    monkeypatch.setattr(qa_routes, "generate_embeddings", generate)
+    for name in ("search_chunks", "search_text_chunks", "search_hybrid_chunks"):
+        monkeypatch.setattr(
+            qa_routes,
+            name,
+            lambda *args, _name=name, **kwargs: calls.append(_name) or [],
+            raising=False,
+        )
+
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [{
+        "vector": "search_chunks",
+        "text": "search_text_chunks",
+        "hybrid": "search_hybrid_chunks",
+    }[expected_strategy]]
+    assert bool(embedding_calls) is uses_embeddings
+
+
+@pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
+def test_ask_checks_owner_before_selected_search_strategy(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    _, collection_id, _ = create_collection("owner@example.test")
+    _, _, token = create_collection("other@example.test")
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("Busca ou modelo acessado antes da validação de propriedade")
+
+    monkeypatch.setattr(qa_routes, "generate_embeddings", forbidden)
+    monkeypatch.setattr(qa_routes, "generate_chat_completion", forbidden)
+    for name in ("search_chunks", "search_text_chunks", "search_hybrid_chunks"):
+        monkeypatch.setattr(qa_routes, name, forbidden, raising=False)
+
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Pergunta privada?", "strategy": strategy},
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 404

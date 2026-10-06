@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,7 +18,12 @@ from acervo_ia.services.embeddings import (
     EmbeddingServiceError,
     generate_embeddings,
 )
-from acervo_ia.services.semantic_search import SearchHit, search_hybrid_chunks
+from acervo_ia.services.semantic_search import (
+    SearchHit,
+    search_chunks,
+    search_hybrid_chunks,
+    search_text_chunks,
+)
 
 router = APIRouter(prefix="/collections", tags=["questions and answers"])
 
@@ -41,6 +46,7 @@ SOURCE_MARKER_PATTERN = re.compile(r"\[(S[^\]]*)\]")
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4_000)
     limit: int = Field(default=5, ge=1, le=10)
+    strategy: Literal["vector", "text", "hybrid"] = "vector"
 
 
 class AskSource(BaseModel):
@@ -186,15 +192,32 @@ def ask_collection(
 ) -> AskResponse:
     # Enforce tenant ownership before embedding, searching, or using the chat model.
     collection = _get_owned_collection(collection_id, user, session)
-    query_vector = _query_vector(request.question)
-    hits = search_hybrid_chunks(
-        session,
-        collection_id=collection.id,
-        query=request.question,
-        embedding=query_vector,
-        embedding_model=config.OLLAMA_EMBEDDING_MODEL,
-        limit=request.limit,
-    )
+    if request.strategy == "text":
+        hits = search_text_chunks(
+            session,
+            collection_id=collection.id,
+            query=request.question,
+            limit=request.limit,
+        )
+    else:
+        query_vector = _query_vector(request.question)
+        if request.strategy == "vector":
+            hits = search_chunks(
+                session,
+                collection_id=collection.id,
+                embedding=query_vector,
+                embedding_model=config.OLLAMA_EMBEDDING_MODEL,
+                limit=request.limit,
+            )
+        else:
+            hits = search_hybrid_chunks(
+                session,
+                collection_id=collection.id,
+                query=request.question,
+                embedding=query_vector,
+                embedding_model=config.OLLAMA_EMBEDDING_MODEL,
+                limit=request.limit,
+            )
     if not hits:
         return AskResponse(answer=NO_EVIDENCE_ANSWER, sources=[])
 

@@ -66,3 +66,21 @@ Após iniciar PostgreSQL e Ollama, instalar o modelo configurado e aplicar as mi
 O comando reutiliza os manuais fictícios e as 30 perguntas de `data/demo/`. Gera embeddings com o Ollama configurado e executa as três estratégias no PostgreSQL local. Usuário, coleções, documentos, trechos e vetores da avaliação ficam em uma única transação que é sempre revertida; nada do benchmark é persistido. Os testes automatizados simulam o provedor e não precisam do Ollama: `.venv/bin/python -m pytest`.
 
 O resultado de referência da execução local de 2026-10-05 está registrado em [`docs/avaliacao-inicial.md`](docs/avaliacao-inicial.md). É um diagnóstico dos 25 exemplos respondíveis, não uma alegação de qualidade geral; a métrica não mede a qualidade de respostas geradas.
+
+## Interface web
+
+A SPA React/TypeScript fica em `web/`. O Vite serve a interface em `http://127.0.0.1:5173` e encaminha `/api` para a API local em `http://127.0.0.1:8000`; para outro destino de desenvolvimento, configure `VITE_DEV_API_TARGET` no ambiente do Vite. O navegador guarda o bearer token somente em `sessionStorage`; a API continua responsável por autenticar cada requisição e filtrar coleções e documentos pela conta do token.
+
+Em um terminal, inicie a API e o Ollama conforme as instruções acima. Crie a primeira conta pelo comando privado `.venv/bin/python -m acervo_ia.cli`. Em outro terminal:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Abra `http://127.0.0.1:5173`, entre com essa conta e crie uma coleção. Dentro dela, envie um PDF, DOCX ou TXT de até 20 MiB, abra os detalhes e escolha **Processar documento**. A interface extrai os trechos e solicita os vetores ao Ollama; se o Ollama estiver indisponível, o documento processado permanece e os vetores podem ser tentados novamente.
+
+Na tela **Consultar coleção**, faça uma pergunta. É possível selecionar busca vetorial, textual ou híbrida; a vetorial é a opção inicial porque obteve os melhores resultados neste benchmark local específico (25 perguntas respondíveis e dois manuais fictícios), sem indicar superioridade geral. A resposta só apresenta fontes devolvidas e validadas pelo backend, com documento, página quando disponível e trecho recuperado.
+
+Valide a interface com `cd web && npm test`, `npm run typecheck` e `npm run build`. O comando `npm run build` executa a verificação de tipos antes de gerar os arquivos em `web/dist/`.
