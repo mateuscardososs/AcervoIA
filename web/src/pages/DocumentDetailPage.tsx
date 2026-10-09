@@ -5,6 +5,7 @@ import {
   ApiError,
   type Collection,
   type DocumentRecord,
+  type DocumentTaskRecord,
 } from "../api/client";
 import { LoadingState } from "../components/LoadingState";
 
@@ -24,6 +25,7 @@ export function DocumentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState(false);
   const [step, setStep] = useState<string | null>(null);
+  const [task, setTask] = useState<DocumentTaskRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -67,18 +69,42 @@ export function DocumentDetailPage() {
     setError(null);
     setNotice(null);
     setStep("Extraindo texto…");
+    setTask(null);
     setDocument({ ...document, processing_status: "processing", processing_error: null });
     try {
-      const processed = await api.processDocument(collectionId, document.id);
+      const processed = await waitForTask(
+        await api.processDocument(collectionId, document.id),
+        document.id,
+        "Extraindo texto",
+      );
+      if (processed.status !== "completed") {
+        setStep(null);
+        setDocument((current) => current ? {
+          ...current,
+          processing_status: "failed",
+          processing_error: processed.error || "Não foi possível extrair texto do documento.",
+        } : current);
+        setError(processed.error || "Não foi possível extrair texto do documento.");
+        return;
+      }
       setDocument((current) => current ? {
         ...current,
-        processing_status: processed.processing_status as DocumentRecord["processing_status"],
+        processing_status: "completed",
         processing_error: null,
       } : current);
       setStep("Preparando busca vetorial…");
-      const result = await api.embedDocument(collectionId, document.id);
+      const result = await waitForTask(
+        await api.embedDocument(collectionId, document.id),
+        document.id,
+        "Gerando vetores",
+      );
       setStep(null);
-      setNotice(`${result.chunk_count} trechos extraídos e preparados para consulta.`);
+      if (result.status === "completed") {
+        setNotice(`${result.result_count ?? processed.result_count ?? 0} trechos extraídos e preparados para consulta.`);
+      } else {
+        setError(result.error || "Não foi possível preparar a busca vetorial.");
+        setNotice("O texto foi processado; os vetores podem ser gerados novamente depois.");
+      }
     } catch (cause) {
       setStep(null);
       if (cause instanceof ApiError && cause.status === 503) {
@@ -94,6 +120,25 @@ export function DocumentDetailPage() {
     } finally {
       setActive(false);
     }
+  }
+
+  async function waitForTask(
+    initial: DocumentTaskRecord,
+    currentDocumentId: string,
+    label: string,
+  ): Promise<DocumentTaskRecord> {
+    let current = initial;
+    setTask(current);
+    setStep(`${label}: ${taskStatus(current.status)} (${current.progress}%)`);
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      if (current.status === "completed" || current.status === "failed") return current;
+      current = await api.documentTask(collectionId, currentDocumentId, current.id);
+      setTask(current);
+      setStep(`${label}: ${taskStatus(current.status)} (${current.progress}%)`);
+      if (current.status === "completed" || current.status === "failed") return current;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    throw new Error("Task polling timed out");
   }
 
   if (loading) return <div className="page-content"><LoadingState label="Carregando documento…" /></div>;
@@ -140,6 +185,17 @@ export function DocumentDetailPage() {
         </div>
 
         {step && <LoadingState label={step} />}
+        {task && (task.status === "pending" || task.status === "processing") && (
+          <div className="document-task-progress" role="status" aria-live="polite">
+            <span>{taskStatus(task.status)} · {task.progress}%</span>
+            <progress aria-label="Progresso da tarefa" max={100} value={task.progress} />
+          </div>
+        )}
+        {task && (task.status === "completed" || task.status === "failed") && (
+          <p className={task.status === "failed" ? "notice notice-error" : "notice notice-success"} role="status">
+            {taskStatus(task.status)}{task.status === "failed" && task.error ? `: ${task.error}` : ""}
+          </p>
+        )}
         <div className="document-detail-actions">
           <button className="button button-primary" disabled={active} onClick={() => void process()} type="button">
             {active ? "Processando…" : document.processing_status === "completed" ? "Reprocessar e atualizar busca" : "Processar documento"}
@@ -161,4 +217,13 @@ export function DocumentDetailPage() {
       </section>
     </div>
   );
+}
+
+function taskStatus(status: DocumentTaskRecord["status"]): string {
+  return {
+    pending: "Aguardando na fila",
+    processing: "Em processamento",
+    completed: "Concluída",
+    failed: "Falhou",
+  }[status];
 }

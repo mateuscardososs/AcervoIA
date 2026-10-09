@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import Any
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -18,6 +19,7 @@ from acervo_ia.db.models import Base, Collection, Document, DocumentChunk, User
 from acervo_ia.main import app
 from acervo_ia.security import create_access_token
 from acervo_ia.services.document_processing import TextPage, chunk_pages
+from acervo_ia.worker import run_task
 
 
 @pytest.fixture
@@ -34,6 +36,7 @@ def processing_client(
         "DOCUMENT_STORAGE_DIRECTORY",
         tmp_path / "stored",
     )
+    monkeypatch.setattr(config, "DOCUMENT_STORAGE_DIRECTORY", tmp_path / "stored")
     engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -151,6 +154,24 @@ def create_document(
     )
 
 
+def enqueue_and_run_processing(
+    client: TestClient,
+    collection_id: UUID,
+    document_id: UUID,
+    token: str,
+) -> Any:
+    endpoint = f"/collections/{collection_id}/documents/{document_id}/process"
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(endpoint, headers=headers)
+    assert response.status_code == 202
+    task_id = response.json()["id"]
+    run_task(task_id, session_factory=app.state.test_session_factory)
+    return client.get(
+        f"/collections/{collection_id}/documents/{document_id}/tasks/{task_id}",
+        headers=headers,
+    )
+
+
 @pytest.mark.parametrize(
     "filename,content_type,content,expected_text,expected_page",
     [
@@ -192,14 +213,13 @@ def test_processes_txt_pdf_and_docx(
         content,
     )
 
-    response = processing_client.post(
-        f"/collections/{collection_id}/documents/{document_id}/process",
-        headers={"Authorization": f"Bearer {token}"},
+    response = enqueue_and_run_processing(
+        processing_client, collection_id, document_id, token
     )
 
     assert response.status_code == 200
-    assert response.json()["processing_status"] == "completed"
-    assert response.json()["chunk_count"] == 1
+    assert response.json()["status"] == "completed"
+    assert response.json()["result_count"] == 1
     with app.state.test_session_factory() as session:
         document = session.get(Document, document_id)
         chunks = session.scalars(
@@ -237,9 +257,8 @@ def test_pdf_chunks_keep_page_numbers(
         pdf_bytes("Pagina um."),
     )
 
-    response = processing_client.post(
-        f"/collections/{collection_id}/documents/{document_id}/process",
-        headers={"Authorization": f"Bearer {token}"},
+    response = enqueue_and_run_processing(
+        processing_client, collection_id, document_id, token
     )
 
     assert response.status_code == 200
@@ -266,12 +285,15 @@ def test_reprocessing_replaces_previous_chunks(
     endpoint = f"/collections/{collection_id}/documents/{document_id}/process"
     headers = {"Authorization": f"Bearer {token}"}
 
-    first = processing_client.post(endpoint, headers=headers)
+    first_task = processing_client.post(endpoint, headers=headers)
+    assert first_task.status_code == 202
+    run_task(first_task.json()["id"], session_factory=app.state.test_session_factory)
     stored_path.write_bytes(b"B" * 25)
-    second = processing_client.post(endpoint, headers=headers)
+    second_task = processing_client.post(endpoint, headers=headers)
+    assert second_task.status_code == 202
+    run_task(second_task.json()["id"], session_factory=app.state.test_session_factory)
 
-    assert first.status_code == second.status_code == 200
-    assert first.json()["chunk_count"] == second.json()["chunk_count"] == 3
+    assert first_task.status_code == second_task.status_code == 202
     with app.state.test_session_factory() as session:
         chunks = session.scalars(
             select(DocumentChunk)
@@ -293,21 +315,26 @@ def test_document_without_extractable_text_fails_safely_and_keeps_file(
         b" \n\t ",
     )
 
-    response = processing_client.post(
+    task = processing_client.post(
         f"/collections/{collection_id}/documents/{document_id}/process",
         headers={"Authorization": f"Bearer {token}"},
     )
+    assert task.status_code == 202
+    run_task(task.json()["id"], session_factory=app.state.test_session_factory)
+    response = processing_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/tasks/{task.json()['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
 
-    assert response.status_code == 422
-    assert response.json() == {
-        "detail": "Não foi possível extrair texto do documento."
-    }
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"] == "Não foi possível extrair texto do documento."
     assert stored_path.is_file()
     with app.state.test_session_factory() as session:
         document = session.get(Document, document_id)
         assert document is not None
         assert document.processing_status == "failed"
-        assert document.processing_error == response.json()["detail"]
+        assert document.processing_error == response.json()["error"]
         assert session.scalar(
             select(DocumentChunk).where(DocumentChunk.document_id == document_id)
         ) is None

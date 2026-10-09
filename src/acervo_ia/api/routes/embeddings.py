@@ -4,13 +4,20 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from acervo_ia import config
 from acervo_ia.api.document_scope import validate_document_filter
+from acervo_ia.api.document_task_schemas import DocumentTaskResponse
 from acervo_ia.db.connection import get_db
 from acervo_ia.db.models import Collection, Document, DocumentChunk, User
 from acervo_ia.security import get_current_user
+from acervo_ia.services.document_tasks import (
+    ActiveDocumentTaskError,
+    DocumentTaskQueueError,
+    enqueue_document_task,
+)
 from acervo_ia.services.embeddings import (
     EmbeddingDimensionError,
     EmbeddingServiceError,
@@ -24,12 +31,6 @@ from acervo_ia.services.semantic_search import (
 )
 
 router = APIRouter(prefix="/collections", tags=["semantic search"])
-
-
-class DocumentEmbeddingResponse(BaseModel):
-    document_id: UUID
-    embedding_model: str
-    chunk_count: int
 
 
 class SemanticSearchRequest(BaseModel):
@@ -51,6 +52,21 @@ class SearchResult(BaseModel):
 
 class SemanticSearchResponse(BaseModel):
     results: list[SearchResult]
+
+
+def _generate(texts: list[str]) -> list[list[float]]:
+    try:
+        return generate_embeddings(texts, model=config.OLLAMA_EMBEDDING_MODEL)
+    except EmbeddingDimensionError:
+        raise HTTPException(
+            status_code=502,
+            detail="O modelo local retornou vetores incompatíveis com a busca.",
+        ) from None
+    except EmbeddingServiceError:
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível usar o serviço local de embeddings.",
+        ) from None
 
 
 def _get_owned_collection(
@@ -86,14 +102,15 @@ def _generate(texts: list[str]) -> list[list[float]]:
 
 @router.post(
     "/{collection_id}/documents/{document_id}/embeddings",
-    response_model=DocumentEmbeddingResponse,
+    response_model=DocumentTaskResponse,
+    status_code=202,
 )
 def embed_document(
     collection_id: UUID,
     document_id: UUID,
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-) -> DocumentEmbeddingResponse:
+) -> DocumentTaskResponse:
     collection = _get_owned_collection(collection_id, user, session)
     document = session.scalar(
         select(Document).where(
@@ -115,22 +132,25 @@ def embed_document(
             detail="O documento ainda não possui trechos processados.",
         )
 
-    vectors = _generate([chunk.content for chunk in chunks])
-    if len(vectors) != len(chunks):
-        raise HTTPException(
-            status_code=502,
-            detail="O modelo local retornou uma resposta incompatível com o documento.",
+    try:
+        task = enqueue_document_task(
+            session,
+            document=document,
+            collection=collection,
+            user=user,
+            task_type="embeddings",
         )
-
-    for chunk, vector in zip(chunks, vectors, strict=True):
-        chunk.embedding = vector
-        chunk.embedding_model = config.OLLAMA_EMBEDDING_MODEL
-    session.commit()
-    return DocumentEmbeddingResponse(
-        document_id=document.id,
-        embedding_model=config.OLLAMA_EMBEDDING_MODEL,
-        chunk_count=len(chunks),
-    )
+    except ActiveDocumentTaskError:
+        raise HTTPException(
+            status_code=409,
+            detail="Já existe outra tarefa ativa para este documento.",
+        ) from None
+    except DocumentTaskQueueError:
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível iniciar a geração de vetores.",
+        ) from None
+    return DocumentTaskResponse.model_validate(task)
 
 
 @router.post(

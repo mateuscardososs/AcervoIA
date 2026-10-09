@@ -17,6 +17,7 @@ from acervo_ia.api.routes import embeddings as embedding_routes
 from acervo_ia.security import create_access_token
 from acervo_ia.services import embeddings as embedding_service
 from acervo_ia.services import semantic_search
+from acervo_ia.worker import run_task
 
 
 @pytest.fixture
@@ -126,6 +127,24 @@ def vectors(count: int, *, dimensions: int = 768) -> list[list[float]]:
     ]
 
 
+def enqueue_and_run_embedding(
+    client: TestClient,
+    collection_id: UUID,
+    document_id: UUID,
+    token: str,
+) -> Any:
+    endpoint = f"/collections/{collection_id}/documents/{document_id}/embeddings"
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(endpoint, headers=headers)
+    assert response.status_code == 202
+    task_id = response.json()["id"]
+    run_task(task_id, session_factory=app.state.test_session_factory)
+    return client.get(
+        f"/collections/{collection_id}/documents/{document_id}/tasks/{task_id}",
+        headers=headers,
+    )
+
+
 def test_ollama_embeddings_use_configured_model_and_dimension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,16 +190,22 @@ def test_document_embeddings_are_saved_per_chunk_with_model(
         response={"model": "embeddinggemma", "embeddings": vectors(2)},
     )
 
-    response = embeddings_client.post(
-        f"/collections/{collection_id}/documents/{document_id}/embeddings",
-        headers={"Authorization": f"Bearer {token}"},
+    response = enqueue_and_run_embedding(
+        embeddings_client, collection_id, document_id, token
     )
 
     assert response.status_code == 200
     assert response.json() == {
-        "document_id": str(document_id),
+        "id": response.json()["id"],
+        "task_type": "embeddings",
+        "status": "completed",
+        "progress": 100,
+        "attempt_count": 1,
+        "error": None,
+        "result_count": 2,
         "embedding_model": "embeddinggemma",
-        "chunk_count": 2,
+        "created_at": response.json()["created_at"],
+        "updated_at": response.json()["updated_at"],
     }
     with app.state.test_session_factory() as session:
         chunks = session.scalars(
@@ -209,6 +234,8 @@ def test_reembedding_updates_vectors_and_model_for_existing_chunks(
         response={"model": "embeddinggemma", "embeddings": vectors(2)},
     )
     first = embeddings_client.post(endpoint, headers=headers)
+    assert first.status_code == 202
+    run_task(first.json()["id"], session_factory=app.state.test_session_factory)
 
     mocked_ollama(
         monkeypatch,
@@ -218,8 +245,10 @@ def test_reembedding_updates_vectors_and_model_for_existing_chunks(
         },
     )
     second = embeddings_client.post(endpoint, headers=headers)
+    assert second.status_code == 202
+    run_task(second.json()["id"], session_factory=app.state.test_session_factory)
 
-    assert first.status_code == second.status_code == 200
+    assert first.status_code == second.status_code == 202
     with app.state.test_session_factory() as session:
         chunks = session.scalars(
             select(DocumentChunk)
@@ -253,12 +282,19 @@ def test_invalid_embedding_dimension_does_not_overwrite_stored_vectors(
         response={"model": "embeddinggemma", "embeddings": vectors(2, dimensions=7)},
     )
 
-    response = embeddings_client.post(
+    queued = embeddings_client.post(
         f"/collections/{collection_id}/documents/{document_id}/embeddings",
         headers={"Authorization": f"Bearer {token}"},
     )
+    assert queued.status_code == 202
+    run_task(queued.json()["id"], session_factory=app.state.test_session_factory)
+    response = embeddings_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/tasks/{queued.json()['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
 
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
     with app.state.test_session_factory() as session:
         chunks = session.scalars(
             select(DocumentChunk).where(DocumentChunk.document_id == document_id)
@@ -279,12 +315,19 @@ def test_embedding_connection_failure_returns_safe_response(
         failure=httpx.ConnectError("private connection detail"),
     )
 
-    response = embeddings_client.post(
+    queued = embeddings_client.post(
         f"/collections/{collection_id}/documents/{document_id}/embeddings",
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    assert response.status_code == 503
+    assert queued.status_code == 202
+    run_task(queued.json()["id"], session_factory=app.state.test_session_factory)
+    response = embeddings_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/tasks/{queued.json()['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.json()["status"] == "pending"
+    assert response.json()["attempt_count"] == 1
     assert "private connection detail" not in response.text
 
 

@@ -133,11 +133,17 @@ describe("AcervoIA web flows", () => {
         return jsonResponse(uploaded ? [currentDocument] : []);
       }
       if (path.endsWith("/d-1/process")) {
-        currentDocument = { ...currentDocument, processing_status: "completed" };
-        return jsonResponse({ document_id: "d-1", processing_status: "completed", chunk_count: 3 });
+        return jsonResponse({ id: "t-process", task_type: "process", status: "pending", progress: 0, attempt_count: 0, error: null, result_count: null, embedding_model: null, created_at: "2026-01-01", updated_at: "2026-01-01" }, 202);
       }
       if (path.endsWith("/d-1/embeddings")) {
-        return jsonResponse({ detail: "Não foi possível usar o serviço local de embeddings." }, 503);
+        return jsonResponse({ id: "t-embed", task_type: "embeddings", status: "pending", progress: 0, attempt_count: 0, error: null, result_count: null, embedding_model: null, created_at: "2026-01-01", updated_at: "2026-01-01" }, 202);
+      }
+      if (path.endsWith("/tasks/t-process")) {
+        currentDocument = { ...currentDocument, processing_status: "completed" };
+        return jsonResponse({ id: "t-process", task_type: "process", status: "completed", progress: 100, attempt_count: 1, error: null, result_count: 3, embedding_model: null, created_at: "2026-01-01", updated_at: "2026-01-01" });
+      }
+      if (path.endsWith("/tasks/t-embed")) {
+        return jsonResponse({ id: "t-embed", task_type: "embeddings", status: "failed", progress: 15, attempt_count: 3, error: "Não foi possível gerar os vetores do documento.", result_count: null, embedding_model: null, created_at: "2026-01-01", updated_at: "2026-01-01" });
       }
       return jsonResponse({ detail: "not found" }, 404);
     });
@@ -154,7 +160,7 @@ describe("AcervoIA web flows", () => {
     expect(await screen.findByRole("heading", { name: "manual-orion.txt" })).toBeVisible();
     await actor.click(screen.getByRole("button", { name: "Processar documento" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Ollama/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/vetores/i);
     expect(screen.getByRole("heading", { name: "Processado" })).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/collections/c-1/documents/d-1/process",

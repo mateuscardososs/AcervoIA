@@ -145,6 +145,59 @@ class DocumentChunk(Base):
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
+class DocumentTask(Base):
+    __tablename__ = "document_tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "task_type IN ('process', 'embeddings')",
+            name="ck_document_tasks_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'failed')",
+            name="ck_document_tasks_status",
+        ),
+        CheckConstraint("progress BETWEEN 0 AND 100", name="ck_document_tasks_progress"),
+        CheckConstraint("attempt_count >= 0", name="ck_document_tasks_attempts"),
+        Index(
+            "uq_document_tasks_active_document",
+            "document_id",
+            unique=True,
+            postgresql_where=literal_column("status IN ('pending', 'processing')"),
+            sqlite_where=literal_column("status IN ('pending', 'processing')"),
+        ),
+        Index("ix_document_tasks_status_lease", "status", "lease_expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    collection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    task_type: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    document: Mapped["Document"] = relationship()
+
+
 class QuestionHistory(Base):
     __tablename__ = "question_history"
     __table_args__ = (

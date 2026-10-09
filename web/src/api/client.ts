@@ -27,6 +27,19 @@ export type DocumentRecord = {
   processing_status: "pending" | "processing" | "completed" | "failed";
   processing_error: string | null;
 };
+
+export type DocumentTaskRecord = {
+  id: string;
+  task_type: "process" | "embeddings";
+  status: "pending" | "processing" | "completed" | "failed";
+  progress: number;
+  attempt_count: number;
+  error: string | null;
+  result_count: number | null;
+  embedding_model: string | null;
+  created_at: string;
+  updated_at: string;
+};
 export type SearchStrategy = "vector" | "text" | "hybrid";
 export type AskSource = {
   source_id: string;
@@ -185,23 +198,20 @@ export const api = {
     );
   },
   processDocument(collectionId: string, documentId: string) {
-    return request<{
-      document_id: string;
-      processing_status: string;
-      chunk_count: number;
-    }>(
+    return request<DocumentTaskRecord>(
       `/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/process`,
       { method: "POST" },
     );
   },
   embedDocument(collectionId: string, documentId: string) {
-    return request<{
-      document_id: string;
-      embedding_model: string;
-      chunk_count: number;
-    }>(
+    return request<DocumentTaskRecord>(
       `/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/embeddings`,
       { method: "POST" },
+    );
+  },
+  documentTask(collectionId: string, documentId: string, taskId: string) {
+    return request<DocumentTaskRecord>(
+      `/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/tasks/${encodeURIComponent(taskId)}`,
     );
   },
   ask(

@@ -167,6 +167,8 @@ input::placeholder, textarea::placeholder { color: #9aabad; }
 .document-actions { display: flex; align-items: center; gap: 3px; }
 .document-detail-header .page-subtitle a { color: var(--teal); font-weight: 700; text-decoration: none; }
 .document-detail-panel { padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.document-task-progress { display: grid; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; }
+.document-task-progress progress { width: 100%; height: 8px; accent-color: var(--accent); }
 .document-detail-state { display: grid; grid-template-columns: 57px minmax(0, 1fr) auto; align-items: center; gap: 18px; }
 .detail-file-mark { display: grid; place-items: center; width: 54px; height: 61px; border: 1px solid #d6e2e3; border-radius: 6px 6px 10px 6px; color: var(--teal); background: #f5fbfa; font: 500 11px var(--mono); }
 .detail-processing { color: var(--signal-dark); background: #fff8e9; }

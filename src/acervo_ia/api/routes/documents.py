@@ -19,23 +19,24 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
+from acervo_ia.api.document_task_schemas import DocumentTaskResponse
 from acervo_ia.config import (
     DOCUMENT_FORMATS,
     DOCUMENT_STORAGE_DIRECTORY,
     MAX_DOCUMENT_SIZE_BYTES,
 )
 from acervo_ia.db.connection import get_db
-from acervo_ia.db.models import Collection, Document, DocumentChunk, User
+from acervo_ia.db.models import Collection, Document, DocumentTask, User
 from acervo_ia.security import get_current_user
-from acervo_ia.services.document_processing import (
-    DocumentExtractionError,
-    chunk_pages,
-    extract_document_pages,
+from acervo_ia.services.document_tasks import (
+    ActiveDocumentTaskError,
+    DocumentTaskQueueError,
+    enqueue_document_task,
 )
 
 router = APIRouter(prefix="/collections", tags=["documents"])
@@ -51,12 +52,6 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     processing_status: str
     processing_error: str | None
-
-
-class DocumentProcessingResponse(BaseModel):
-    document_id: UUID
-    processing_status: str
-    chunk_count: int
 
 
 def _stream_open_file(open_file: BinaryIO) -> Iterator[bytes]:
@@ -502,14 +497,15 @@ def open_original_document(
 
 @router.post(
     "/{collection_id}/documents/{document_id}/process",
-    response_model=DocumentProcessingResponse,
+    response_model=DocumentTaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def process_document(
     collection_id: UUID,
     document_id: UUID,
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-) -> DocumentProcessingResponse:
+) -> DocumentTaskResponse:
     collection = _get_owned_collection(collection_id, user, session)
     document = session.scalar(
         select(Document).where(
@@ -523,53 +519,61 @@ def process_document(
             detail="Documento não encontrado.",
         )
 
-    stored_path = _safe_storage_path(document.storage_key)
-    document.processing_status = "processing"
-    document.processing_error = None
-    session.commit()
-
     try:
-        pages = extract_document_pages(stored_path, document.content_type)
-        chunks = chunk_pages(pages)
-    except (DocumentExtractionError, ValueError):
-        return _fail_document_processing(document, session)
-
-    if not chunks:
-        return _fail_document_processing(document, session)
-
-    session.execute(
-        delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
-    )
-    session.add_all(
-        DocumentChunk(
-            document_id=document.id,
-            position=position,
-            page_number=chunk.page_number,
-            content=chunk.content,
+        task = enqueue_document_task(
+            session,
+            document=document,
+            collection=collection,
+            user=user,
+            task_type="process",
         )
-        for position, chunk in enumerate(chunks)
-    )
-    document.processing_status = "completed"
-    document.processing_error = None
-    session.commit()
-    return DocumentProcessingResponse(
-        document_id=document.id,
-        processing_status=document.processing_status,
-        chunk_count=len(chunks),
-    )
+    except ActiveDocumentTaskError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Já existe outra tarefa ativa para este documento.",
+        ) from None
+    except DocumentTaskQueueError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Não foi possível iniciar o processamento do documento.",
+        ) from None
+    return DocumentTaskResponse.model_validate(task)
 
 
-def _fail_document_processing(
-    document: Document,
-    session: Session,
-) -> DocumentProcessingResponse:
-    session.execute(
-        delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+@router.get(
+    "/{collection_id}/documents/{document_id}/tasks/{task_id}",
+    response_model=DocumentTaskResponse,
+)
+def get_document_task(
+    collection_id: UUID,
+    document_id: UUID,
+    task_id: UUID,
+    session: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> DocumentTaskResponse:
+    collection = _get_owned_collection(collection_id, user, session)
+    document = session.scalar(
+        select(Document).where(
+            Document.id == document_id,
+            Document.collection_id == collection.id,
+        )
     )
-    document.processing_status = "failed"
-    document.processing_error = "Não foi possível extrair texto do documento."
-    session.commit()
-    raise HTTPException(
-        status_code=422,
-        detail=document.processing_error,
-    ) from None
+    if document is None:
+        raise HTTPException(status_code=404, detail="Documento não encontrado.")
+    try:
+        task = session.scalar(
+            select(DocumentTask).where(
+                DocumentTask.id == task_id,
+                DocumentTask.document_id == document.id,
+                DocumentTask.collection_id == collection.id,
+                DocumentTask.owner_id == user.id,
+            )
+        )
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Não foi possível consultar o estado do processamento.",
+        ) from None
+    if task is None:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    return DocumentTaskResponse.model_validate(task)

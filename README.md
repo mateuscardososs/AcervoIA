@@ -20,10 +20,15 @@ Os dados de cada conta são isolados pelo usuário associado ao token; o cliente
 flowchart LR
     U[Pessoa usuária] --> W[Interface React / Vite]
     W -->|HTTP + bearer token| A[API FastAPI]
-    A -->|contas, coleções, documentos, trechos e vetores| DB[(PostgreSQL + pgvector)]
+    A -->|tarefas duráveis| DB[(PostgreSQL + pgvector)]
+    WK[Worker separado] -->|consulta tarefas e grava resultados| DB
+    WK -->|extrai arquivos| FS[(Armazenamento local)]
+    WK -->|gera embeddings| O[Ollama local]
+    A -->|contas, coleções, documentos e trechos| DB
     A -->|arquivos com chave interna| FS[(Armazenamento local)]
-    A -->|texto para embeddings e geração| O[Ollama local]
-    O -->|vetores e resposta| A
+    A -->|perguntas e geração de respostas| O
+    O -->|resposta| A
+    O -->|vetores| WK
     DB -->|trechos recuperados| A
     A -->|resposta + fontes validadas| W
 ```
@@ -33,8 +38,8 @@ flowchart LR
 - **Frontend:** React, TypeScript e Vite em `web/`. O cliente centraliza chamadas HTTP e guarda o token em `sessionStorage`; a API é a autoridade final para autenticação e autorização.
 - **API:** FastAPI, Pydantic e SQLAlchemy. Alembic controla a evolução do schema. Senhas são armazenadas como hashes Argon2; tokens JWT são assinados com uma chave configurada no ambiente.
 - **Banco e arquivos:** PostgreSQL com a extensão pgvector armazena metadados, trechos e vetores de 768 dimensões. Os arquivos ficam no diretório local `data/uploads/`, com nomes internos aleatórios — não se usa o nome enviado como caminho.
-- **Processamento:** PDF, DOCX e TXT são extraídos sem OCR e divididos em trechos de 1.000 caracteres, com sobreposição de 150. Reprocessar substitui os trechos anteriores; falhas de extração são registradas sem remover o arquivo.
-- **Embeddings:** Ollama gera um vetor por trecho. O modelo registrado com o vetor permite identificar sua origem; a dimensão retornada é conferida contra a coluna pgvector.
+- **Processamento:** a API cria tarefas duráveis separadas para extração/chunking e embeddings; um worker Compose as consulta. PDF, DOCX e TXT são extraídos sem OCR e divididos em trechos de 1.000 caracteres, com sobreposição de 150. Reprocessar substitui os trechos anteriores; falhas de extração são registradas sem remover o arquivo.
+- **Embeddings:** o worker chama o Ollama para gerar um vetor por trecho. O modelo registrado com o vetor permite identificar sua origem; a dimensão retornada é conferida contra a coluna pgvector.
 - **Busca:** vetorial usa distância cosseno; textual combina full-text search do PostgreSQL com correspondência literal normalizada para códigos, siglas e modelos; híbrida combina rankings com Reciprocal Rank Fusion (RRF).
 - **Resposta com fontes (RAG):** o serviço recupera trechos, instrui o modelo a escolher somente IDs de fonte permitidos e mantém o texto documental como entrada não confiável. O backend valida cada referência contra os resultados reais; permite uma única tentativa controlada de correção e, se não validar, retorna uma resposta segura sem exibir fontes inválidas.
 
@@ -58,13 +63,14 @@ O Compose requer `POSTGRES_DB`, `POSTGRES_USER` e `POSTGRES_PASSWORD`. A aplica�
 | `POSTGRES_PASSWORD` | Senha inicial do banco no Compose. |
 | `DATABASE_URL` | Conexão PostgreSQL usada pela API e pelas migrações Alembic. |
 | `AUTH_SECRET_KEY` | Assinatura e validação dos tokens JWT; requer pelo menos 32 bytes. |
-| `OLLAMA_BASE_URL` | Endereço do serviço Ollama acessível pela API. |
+| `OLLAMA_BASE_URL` | Endereço do serviço Ollama usado pela API. |
+| `WORKER_OLLAMA_BASE_URL` | URL do Ollama acessível dentro do contêiner do worker; por padrão, usa `host.docker.internal:11434`. |
 | `OLLAMA_EMBEDDING_MODEL` | Tag do modelo de embeddings; os vetores precisam ter 768 dimensões. |
 | `OLLAMA_CHAT_MODEL` | Tag do modelo de chat para geração de respostas. |
 | `VITE_API_BASE_URL` | Base de URL da API usada pelo frontend. |
 | `VITE_DEV_API_TARGET` | Destino do proxy `/api` do Vite durante desenvolvimento. |
 
-O código usa `embeddinggemma` como modelo de embeddings padrão e `qwen2.5:3b` como modelo de chat padrão. Baixe no Ollama o modelo escolhido para cada função (por exemplo, com `ollama pull <tag-configurada>`). A dimensão de embeddings nesta versão é fixa em 768; trocar por um modelo com outra dimensão exige migração compatível do banco. O benchmark de respostas registrado em [`docs/avaliacao-inicial.md`](docs/avaliacao-inicial.md) usou uma configuração de chat diferente do padrão.
+O código usa `embeddinggemma` como modelo de embeddings padrão e `qwen2.5:3b` como modelo de chat padrão. Baixe no Ollama o modelo escolhido para cada função (por exemplo, com `ollama pull <tag-configurada>`). A API usa `OLLAMA_BASE_URL`; no worker Compose, o Ollama do host é acessado por `host.docker.internal:11434`. A dimensão de embeddings nesta versão é fixa em 768; trocar por um modelo com outra dimensão exige migração compatível do banco. O benchmark de respostas registrado em [`docs/avaliacao-inicial.md`](docs/avaliacao-inicial.md) usou uma configuração de chat diferente do padrão.
 
 ### Banco, API e primeira conta
 
@@ -78,6 +84,14 @@ docker compose up -d db
 alembic upgrade head
 uvicorn acervo_ia.main:app --reload --app-dir src --env-file .env
 ```
+
+Depois da migração, inicie o worker em outro terminal. O serviço usa o mesmo PostgreSQL do Compose, compartilha `data/uploads/` com a API e acessa o Ollama do host pela URL interna `host.docker.internal`:
+
+```bash
+docker compose up -d --build worker
+```
+
+O worker é separado da API e pode ser reiniciado sem perder tarefas pendentes. Ele consulta o PostgreSQL continuamente; acompanhe apenas os estados operacionais com `docker compose logs -f worker` (o código não registra textos, documentos ou exceções de provedores). Para parar somente o worker, use `docker compose stop worker`; isso não apaga tarefas nem dados.
 
 O serviço PostgreSQL do Compose publica a porta local `5434` e usa um volume nomeado para os dados. Inicie o servidor Ollama instalado (por exemplo, `ollama serve` quando ele não for iniciado pelo aplicativo do sistema) e deixe acessíveis os modelos configurados. `/health` verifica a API; `/health/database` verifica o banco. A documentação interativa fica em `http://127.0.0.1:8000/docs`.
 
@@ -133,15 +147,16 @@ Exceto pelos endpoints de saúde e login, as rotas abaixo exigem bearer token. R
 | `POST /collections/{collection_id}/documents` | Enviar PDF, DOCX ou TXT (até 20 MiB). |
 | `GET /collections/{collection_id}/documents` | Listar documentos da coleção. |
 | `DELETE /collections/{collection_id}/documents/{document_id}` | Excluir documento e arquivo local. |
-| `POST /collections/{collection_id}/documents/{document_id}/process` | Extrair texto e substituir os trechos do documento. |
-| `POST /collections/{collection_id}/documents/{document_id}/embeddings` | Gerar ou atualizar vetores dos trechos. |
+| `POST /collections/{collection_id}/documents/{document_id}/process` | Enfileirar extração/chunking (responde `202`). |
+| `POST /collections/{collection_id}/documents/{document_id}/embeddings` | Enfileirar geração/atualização dos vetores separadamente (`202`). |
+| `GET /collections/{collection_id}/documents/{document_id}/tasks/{task_id}` | Consultar estado, progresso, tentativas e eventual erro seguro da tarefa. |
 | `POST /collections/{collection_id}/search` | Recuperar trechos no modo `vector`, `text` ou `hybrid`. |
 | `POST /collections/{collection_id}/ask` | Fazer uma pergunta e retornar resposta com fontes validadas. |
 | `GET /collections/{collection_id}/history` | Listar perguntas e respostas próprias, com paginação por `limit` e `offset`. |
 
 `/search` usa `hybrid` quando nenhum modo é informado; `/ask` e a interface começam em `vector`. Nos dois fluxos é possível selecionar `vector`, `text` ou `hybrid`.
 
-O processamento de documentos retorna estado `pending`, `processing`, `completed` ou `failed`. Se um arquivo não tiver texto extraível, permanece armazenado e recebe uma falha segura; OCR não está implementado. Os documentos TXT e DOCX não têm número de página fornecido pelo extrator; a referência de página é incluída quando disponível, como em PDFs.
+As rotas de processamento e embeddings retornam `202` com o ID da tarefa. Consulte o endpoint de estado até `completed` ou `failed`; o progresso é aproximado por etapa. Uma tarefa ativa por documento impede concorrência conflitante. Falhas transitórias de embeddings podem ser repetidas até três tentativas; erros de extração ou dimensão inválida são terminais. Reenvios/reprocessamentos substituem trechos de forma transacional e atualizam vetores nas linhas existentes. Se um arquivo não tiver texto extraível, permanece armazenado e recebe uma falha segura; OCR não está implementado. TXT e DOCX não têm número de página fornecido pelo extrator; a referência de página é incluída quando disponível, como em PDFs.
 
 ## Testes e CI
 
@@ -181,9 +196,9 @@ Interprete os números com cautela: a amostra tem só 25 exemplos respondíveis 
 
 ## Escopo e limitações conhecidas
 
-Implementado: autenticação local sem cadastro público, coleções isoladas por conta, upload idempotente por conteúdo dentro da coleção, extração síncrona e chunking, embeddings via Ollama, busca vetorial/textual/híbrida e respostas fundamentadas com validação estrita das fontes.
+Implementado: autenticação local sem cadastro público, coleções isoladas por conta, upload idempotente por conteúdo dentro da coleção, tarefas duráveis com worker separado para extração/chunking e embeddings, busca vetorial/textual/híbrida e respostas fundamentadas com validação estrita das fontes.
 
-Ainda não implementado: cadastro público, recuperação de senha, OCR, fila de processamento em segundo plano, continuidade de conversa com contexto entre perguntas, interface administrativa ou integração com outros serviços.
+Ainda não implementado: cadastro público, recuperação de senha, OCR, recuperação de tarefas que excedam o limite de tentativas sem intervenção, continuidade de conversa com contexto entre perguntas, interface administrativa ou integração com outros serviços.
 
 Limitações atuais: arquivos suportados apenas em PDF, DOCX e TXT até 20 MiB; armazenamento de arquivos é local ao host e não é uma solução compartilhada/replicada; os modelos de embedding precisam produzir vetores de 768 dimensões; os benchmarks são pequenos e sintéticos. Não há validação documentada de implantação, monitoramento, backup/recuperação, segurança operacional ou desempenho para produção. A aplicação não deve ser tratada como publicada ou pronta para produção com base neste repositório.
 
