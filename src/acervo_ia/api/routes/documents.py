@@ -1,9 +1,11 @@
 import os
+import stat
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, BinaryIO, Iterator
+from urllib.parse import quote
 from uuid import UUID, uuid4
 from zipfile import BadZipFile, ZipFile
 
@@ -20,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.responses import StreamingResponse
 
 from acervo_ia.config import (
     DOCUMENT_FORMATS,
@@ -54,6 +57,14 @@ class DocumentProcessingResponse(BaseModel):
     document_id: UUID
     processing_status: str
     chunk_count: int
+
+
+def _stream_open_file(open_file: BinaryIO) -> Iterator[bytes]:
+    try:
+        while content := open_file.read(64 * 1024):
+            yield content
+    finally:
+        open_file.close()
 
 
 def _get_owned_collection(
@@ -408,6 +419,85 @@ def delete_document(
             detail="Não foi possível remover o arquivo armazenado.",
         ) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/{collection_id}/documents/{document_id}/file",
+    response_class=StreamingResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "description": "Arquivo original do documento.",
+            "content": {
+                "application/pdf": {},
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {},
+                "text/plain": {},
+            },
+        }
+    },
+)
+def open_original_document(
+    collection_id: UUID,
+    document_id: UUID,
+    session: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> StreamingResponse:
+    collection = _get_owned_collection(collection_id, user, session)
+    document = session.scalar(
+        select(Document).where(
+            Document.id == document_id,
+            Document.collection_id == collection.id,
+        )
+    )
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Documento não encontrado.",
+        )
+
+    stored_path = _safe_storage_path(document.storage_key)
+    try:
+        descriptor = os.open(
+            stored_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        open_file = os.fdopen(descriptor, "rb")
+        file_info = os.fstat(open_file.fileno())
+        if not stat.S_ISREG(file_info.st_mode):
+            open_file.close()
+            raise FileNotFoundError
+    except OSError:
+        if "open_file" in locals() and not open_file.closed:
+            open_file.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="O arquivo original deste documento não está disponível.",
+        ) from None
+
+    filename = document.original_filename.replace("\\", "/").rsplit("/", 1)[-1]
+    filename = "".join(
+        character
+        for character in filename
+        if ord(character) >= 32 and ord(character) != 127
+    ).strip() or str(document.id)
+    media_type = (
+        document.content_type
+        if document.content_type in DOCUMENT_FORMATS.values()
+        else "application/octet-stream"
+    )
+    disposition = "inline" if media_type == "application/pdf" else "attachment"
+    headers = {
+        "Content-Disposition": (
+            f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}"
+        ),
+        "Content-Length": str(file_info.st_size),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return StreamingResponse(
+        _stream_open_file(open_file),
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 @router.post(

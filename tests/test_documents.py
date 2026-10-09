@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
@@ -87,6 +87,29 @@ def docx_bytes() -> bytes:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("word/document.xml", "<document/>")
     return content.getvalue()
+
+
+def create_stored_document(
+    collection_id: UUID,
+    filename: str,
+    content: bytes,
+    content_type: str,
+) -> tuple[UUID, str]:
+    storage_key = uuid4().hex
+    path = documents.DOCUMENT_STORAGE_DIRECTORY / storage_key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    with app.state.test_session_factory() as session:
+        record = Document(
+            collection_id=collection_id,
+            original_filename=filename,
+            storage_key=storage_key,
+            content_type=content_type,
+            size_bytes=len(content),
+        )
+        session.add(record)
+        session.commit()
+        return record.id, storage_key
 
 
 @pytest.mark.parametrize(
@@ -454,3 +477,159 @@ def test_document_operations_are_scoped_to_collection_owner(
         f"/collections/{collection_id}/documents",
         headers=owner_headers,
     ).json()[0]["id"] == document_id
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "content_type", "disposition"),
+    [
+        ("manual.pdf", b"%PDF-1.7\nconteudo", "application/pdf", "inline"),
+        (
+            "manual.docx",
+            docx_bytes(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "attachment",
+        ),
+        ("manual.txt", b"texto original", "text/plain", "attachment"),
+    ],
+)
+def test_owner_can_open_original_document_with_safe_disposition(
+    document_client: TestClient,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    disposition: str,
+) -> None:
+    _, collection_id, token = create_user_and_collection("file-owner@example.test")
+    document_id, storage_key = create_stored_document(
+        collection_id,
+        filename,
+        content,
+        content_type,
+    )
+
+    response = document_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/file",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == content
+    assert response.headers["content-type"].startswith(content_type)
+    assert response.headers["content-disposition"].startswith(disposition)
+    assert storage_key.encode() not in response.content
+
+
+def test_original_file_requires_authentication_and_hides_cross_user_documents(
+    document_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, _ = create_user_and_collection("file-owner@example.test")
+    _, _, other_token = create_user_and_collection("file-other@example.test")
+    document_id, _ = create_stored_document(
+        collection_id,
+        "private.txt",
+        b"private bytes",
+        "text/plain",
+    )
+
+    def path_must_not_be_resolved(_storage_key: str):
+        pytest.fail("O caminho foi resolvido antes da validação da coleção")
+
+    monkeypatch.setattr(documents, "_safe_storage_path", path_must_not_be_resolved)
+    unauthenticated = document_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/file"
+    )
+    foreign = document_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/file",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert foreign.status_code == 404
+
+
+def test_document_cannot_be_opened_through_a_different_collection(
+    document_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id, first_collection, token = create_user_and_collection(
+        "same-owner@example.test"
+    )
+    with app.state.test_session_factory() as session:
+        second_collection = Collection(owner_id=user_id, name="Outra coleção")
+        session.add(second_collection)
+        session.commit()
+        second_collection_id = second_collection.id
+    document_id, _ = create_stored_document(
+        first_collection,
+        "private.txt",
+        b"private bytes",
+        "text/plain",
+    )
+
+    def path_must_not_be_resolved(_storage_key: str):
+        pytest.fail("O arquivo de outra coleção foi resolvido")
+
+    monkeypatch.setattr(documents, "_safe_storage_path", path_must_not_be_resolved)
+    response = document_client.get(
+        f"/collections/{second_collection_id}/documents/{document_id}/file",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_missing_collection_or_document_returns_not_found_before_path_lookup(
+    document_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_user_and_collection("missing-source@example.test")
+    document_id, _ = create_stored_document(
+        collection_id,
+        "private.txt",
+        b"private bytes",
+        "text/plain",
+    )
+
+    def path_must_not_be_resolved(_storage_key: str):
+        pytest.fail("Um recurso inexistente teve o caminho resolvido")
+
+    monkeypatch.setattr(documents, "_safe_storage_path", path_must_not_be_resolved)
+    headers = {"Authorization": f"Bearer {token}"}
+    missing_document = document_client.get(
+        f"/collections/{collection_id}/documents/{uuid4()}/file",
+        headers=headers,
+    )
+    missing_collection = document_client.get(
+        f"/collections/{uuid4()}/documents/{document_id}/file",
+        headers=headers,
+    )
+
+    assert missing_document.status_code == 404
+    assert missing_collection.status_code == 404
+
+
+def test_missing_original_file_returns_safe_not_found_message(
+    document_client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _, collection_id, token = create_user_and_collection("missing-file@example.test")
+    document_id, storage_key = create_stored_document(
+        collection_id,
+        "missing.txt",
+        b"will be removed",
+        "text/plain",
+    )
+    (documents.DOCUMENT_STORAGE_DIRECTORY / storage_key).unlink()
+
+    response = document_client.get(
+        f"/collections/{collection_id}/documents/{document_id}/file",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "O arquivo original deste documento não está disponível."
+    }
+    assert str(documents.DOCUMENT_STORAGE_DIRECTORY) not in response.text
+    assert str(documents.DOCUMENT_STORAGE_DIRECTORY) not in caplog.text

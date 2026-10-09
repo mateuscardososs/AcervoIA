@@ -212,6 +212,8 @@ input::placeholder, textarea::placeholder { color: #9aabad; }
 .source-document { min-width: 0; overflow: hidden; color: #385760; font: 500 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .source-page { margin-left: auto; color: #779095; font: 400 10px var(--mono); white-space: nowrap; }
 .source-snippet { margin: 0; padding: 14px 16px; color: #36565e; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.source-card-actions { display: flex; justify-content: flex-end; padding: 0 13px 12px; }
+.source-open-button { min-height: 32px; padding: 6px 10px; font-size: 10px; }
 .no-sources-note { margin-top: 17px; padding: 13px 16px; border-radius: 5px; color: #657c81; background: #eef3f3; font-size: 12px; line-height: 1.7; }
 .question-history { margin-top: 48px; padding-top: 26px; border-top: 1px solid var(--line); }
 .question-history > .query-empty-state { margin-top: 0; }

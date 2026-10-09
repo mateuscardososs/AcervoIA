@@ -12,7 +12,7 @@ O projeto está em desenvolvimento e foi validado localmente. Não há evidênci
 4. A API envia os trechos ao Ollama local para gerar embeddings e os guarda no PostgreSQL com pgvector.
 5. A pessoa escolhe o modo de busca e faz uma pergunta. A API recupera trechos, pede uma resposta fundamentada ao modelo local e retorna fontes construídas e validadas pelo backend. Respostas aceitas e abstenções ficam no histórico privado da coleção, com opção de consultar novamente.
 
-Os dados de cada conta são isolados pelo usuário associado ao token; o cliente não escolhe o proprietário. O conteúdo dos documentos é tratado como dado não confiável, nunca como instrução para o modelo.
+Os dados de cada conta são isolados pelo usuário associado ao token; o cliente não escolhe o proprietário. O conteúdo dos documentos é tratado como dado não confiável, nunca como instrução para o modelo. Nas fontes da resposta e do histórico, é possível abrir o PDF na página citada ou baixar o DOCX/TXT original; a API confere novamente a propriedade antes de entregar o arquivo.
 
 ## Arquitetura
 

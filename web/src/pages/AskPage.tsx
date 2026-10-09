@@ -32,6 +32,8 @@ export function AskPage() {
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [openingDocumentId, setOpeningDocumentId] = useState<string | null>(null);
+  const [sourceFileError, setSourceFileError] = useState<string | null>(null);
 
   async function loadHistoryPage(offset = 0, append = false) {
     setHistoryLoading(true);
@@ -92,6 +94,45 @@ export function AskPage() {
     await askQuestion(item.question, item.strategy);
   }
 
+  async function openSourceDocument(source: AskResponse["sources"][number]) {
+    const isPdf = source.document_name.toLowerCase().endsWith(".pdf");
+    const pdfWindow = isPdf ? window.open("about:blank", "_blank") : null;
+    if (isPdf && !pdfWindow) {
+      setSourceFileError("O navegador bloqueou a abertura do PDF. Permita pop-ups e tente novamente.");
+      return;
+    }
+
+    setOpeningDocumentId(source.document_id);
+    setSourceFileError(null);
+    try {
+      const file = await api.documentFile(collectionId, source.document_id);
+      const objectUrl = URL.createObjectURL(file);
+      if (isPdf && pdfWindow) {
+        pdfWindow.opener = null;
+        pdfWindow.location.href = `${objectUrl}#page=${source.page_number ?? 1}`;
+      } else {
+        const link = document.createElement("a");
+        const filename = source.document_name.replaceAll("\\", "/").split("/").pop();
+        link.href = objectUrl;
+        link.download = filename || "documento";
+        link.style.display = "none";
+        document.body.append(link);
+        link.click();
+        link.remove();
+      }
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+    } catch (cause) {
+      pdfWindow?.close();
+      setSourceFileError(cause instanceof ApiError && cause.status === 404
+        ? "O arquivo original não está mais disponível nesta coleção."
+        : cause instanceof ApiError && cause.status === 401
+          ? "Sua sessão expirou. Entre novamente para abrir este documento."
+          : "Não foi possível abrir o arquivo original. Tente novamente.");
+    } finally {
+      setOpeningDocumentId(null);
+    }
+  }
+
   if (loading) return <div className="page-content"><LoadingState label="Preparando consulta…" /></div>;
   if (!collection) return <div className="page-content"><p className="notice notice-error" role="alert">{error || "Coleção não encontrada."}</p><Link to="/library">Voltar ao acervo</Link></div>;
 
@@ -140,6 +181,7 @@ export function AskPage() {
       </form>
 
       {error && <p className="notice notice-error" role="alert">{error}</p>}
+      {sourceFileError && <p className="notice notice-error" role="alert">{sourceFileError}</p>}
       {asking && <LoadingState label="Buscando trechos e preparando uma resposta…" />}
 
       {answer && (
@@ -159,7 +201,14 @@ export function AskPage() {
                 <span className="mono-label">{answer.sources.length.toString().padStart(2, "0")} FONTES</span>
               </div>
               <div className="source-list">
-                {answer.sources.map((source) => <SourceCard key={source.source_id} source={source} />)}
+                {answer.sources.map((source) => (
+                  <SourceCard
+                    key={source.source_id}
+                    onOpenDocument={(citedSource) => void openSourceDocument(citedSource)}
+                    opening={openingDocumentId === source.document_id}
+                    source={source}
+                  />
+                ))}
               </div>
             </div>
           ) : (
@@ -198,7 +247,12 @@ export function AskPage() {
                 {item.sources.length > 0 && (
                   <div className="source-list history-source-list">
                     {item.sources.map((source) => (
-                      <SourceCard key={`${item.id}-${source.source_id}`} source={source} />
+                      <SourceCard
+                        key={`${item.id}-${source.source_id}`}
+                        onOpenDocument={(citedSource) => void openSourceDocument(citedSource)}
+                        opening={openingDocumentId === source.document_id}
+                        source={source}
+                      />
                     ))}
                   </div>
                 )}

@@ -59,6 +59,7 @@ function authenticate() {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -252,6 +253,118 @@ describe("AcervoIA web flows", () => {
 
     expect(await screen.findByText("Consulta atualizada.")).toBeVisible();
     expect(asked).toEqual([{ question: savedQuestion.question, strategy: "hybrid", limit: 5 }]);
+  });
+
+  it("opens a cited PDF at its page and downloads a cited text file from history", async () => {
+    authenticate();
+    const historySource = {
+      source_id: "S2",
+      document_id: "d-txt",
+      document_name: "manual-atlas.txt",
+      page_number: null,
+      snippet: "Confira o indicador antes da limpeza.",
+    };
+    const historyItem = {
+      id: "h-2",
+      question: "O que devo conferir?",
+      strategy: "text",
+      answer: "Confira o indicador. [S2]",
+      sources: [historySource],
+      created_at: "2026-10-06T12:00:00Z",
+    };
+    const openedWindow = {
+      opener: window,
+      location: { href: "" },
+      close: vi.fn(),
+    } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(openedWindow);
+    vi.spyOn(URL, "createObjectURL")
+      .mockReturnValueOnce("blob:pdf-source")
+      .mockReturnValueOnce("blob:text-source");
+    const downloads: Array<{ href: string; download: string }> = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push({ href: this.href, download: this.download });
+    });
+    installFetch((path, init) => {
+      if (path === "/auth/me") return jsonResponse(user);
+      if (path === "/collections/c-1") return jsonResponse(collection);
+      if (path === "/collections/c-1/history") {
+        return jsonResponse({ items: [historyItem], limit: 20, offset: 0, has_more: false });
+      }
+      if (path === "/collections/c-1/ask") {
+        expect(new Headers(init.headers).get("Authorization")).toBe("Bearer test-jwt");
+        return jsonResponse({
+          answer: "Confira o certificado. [S1]",
+          sources: [{
+            source_id: "S1",
+            document_id: "d-pdf",
+            document_name: "manual-orion.pdf",
+            page_number: 7,
+            snippet: "O certificado de calibração está no anexo.",
+          }],
+        });
+      }
+      if (path === "/collections/c-1/documents/d-pdf/file") {
+        expect(new Headers(init.headers).get("Authorization")).toBe("Bearer test-jwt");
+        return new Response("%PDF-original", { headers: { "Content-Type": "application/pdf" } });
+      }
+      if (path === "/collections/c-1/documents/d-txt/file") {
+        return new Response("texto-original", { headers: { "Content-Type": "text/plain" } });
+      }
+      return jsonResponse({ detail: "not found" }, 404);
+    });
+    const actor = userEvent.setup();
+    mount("/collections/c-1/ask");
+
+    await actor.type(await screen.findByLabelText("Sua pergunta"), "Qual certificado?");
+    await actor.click(screen.getByRole("button", { name: "Perguntar" }));
+    await actor.click(await screen.findByRole("button", { name: "Abrir PDF na página 7" }));
+    await waitFor(() => expect(openedWindow.location.href).toBe("blob:pdf-source#page=7"));
+    await actor.click(screen.getByRole("button", { name: "Baixar arquivo original" }));
+
+    expect(downloads).toEqual([{ href: "blob:text-source", download: "manual-atlas.txt" }]);
+  });
+
+  it("shows a friendly message when a cited original file is missing", async () => {
+    authenticate();
+    installFetch((path) => {
+      if (path === "/auth/me") return jsonResponse(user);
+      if (path === "/collections/c-1") return jsonResponse(collection);
+      if (path === "/collections/c-1/history") {
+        return jsonResponse({ items: [], limit: 20, offset: 0, has_more: false });
+      }
+      if (path === "/collections/c-1/ask") {
+        return jsonResponse({
+          answer: "Confira a página 7. [S1]",
+          sources: [{
+            source_id: "S1",
+            document_id: "missing-pdf",
+            document_name: "manual-orion.pdf",
+            page_number: 7,
+            snippet: "Trecho recuperado.",
+          }],
+        });
+      }
+      if (path === "/collections/c-1/documents/missing-pdf/file") {
+        return jsonResponse({ detail: "O arquivo original não está mais disponível." }, 404);
+      }
+      return jsonResponse({ detail: "not found" }, 404);
+    });
+    vi.spyOn(window, "open").mockReturnValue({
+      opener: window,
+      location: { href: "" },
+      close: vi.fn(),
+    } as unknown as Window);
+    const actor = userEvent.setup();
+    mount("/collections/c-1/ask");
+
+    await actor.type(await screen.findByLabelText("Sua pergunta"), "Qual o procedimento?");
+    await actor.click(screen.getByRole("button", { name: "Perguntar" }));
+    await actor.click(await screen.findByRole("button", { name: "Abrir PDF na página 7" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "O arquivo original não está mais disponível nesta coleção.",
+    );
   });
 
   it("explains Ollama unavailability on a question without leaking a stack trace", async () => {

@@ -106,6 +106,22 @@ export async function request<T>(
   return (await response.json()) as T;
 }
 
+async function requestBlob(path: string): Promise<Blob> {
+  const headers = new Headers({ Accept: "*/*" });
+  const token = getAccessToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  const response = await fetch(`${apiBase}${path}`, { headers });
+  if (response.status === 401) {
+    clearAccessToken();
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+  }
+  if (!response.ok) {
+    throw new ApiError(await readError(response), response.status);
+  }
+  return response.blob();
+}
+
 function jsonBody(value: unknown): RequestInit {
   return {
     method: "POST",
@@ -197,6 +213,11 @@ export const api = {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     return request<AskHistoryPage>(
       `/collections/${encodeURIComponent(collectionId)}/history?${params.toString()}`,
+    );
+  },
+  documentFile(collectionId: string, documentId: string) {
+    return requestBlob(
+      `/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}/file`,
     );
   },
 };
