@@ -1,13 +1,15 @@
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import desc, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from acervo_ia.db.connection import get_db
-from acervo_ia.db.models import Collection, User
+from acervo_ia.db.models import Collection, QuestionHistory, User
 from acervo_ia.security import get_current_user
 from acervo_ia.services import question_answering
 from acervo_ia.services.chat import ChatModelError
@@ -38,6 +40,22 @@ class AskSource(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     sources: list[AskSource]
+
+
+class AskHistoryItem(BaseModel):
+    id: UUID
+    question: str
+    strategy: Literal["vector", "text", "hybrid"]
+    answer: str
+    sources: list[AskSource]
+    created_at: datetime
+
+
+class AskHistoryPage(BaseModel):
+    items: list[AskHistoryItem]
+    limit: int
+    offset: int
+    has_more: bool
 
 
 def _get_owned_collection(
@@ -90,7 +108,67 @@ def ask_collection(
         ) from None
     except question_answering.InvalidModelAnswer:
         raise HTTPException(status_code=502, detail=INVALID_MODEL_ANSWER) from None
-    return AskResponse(
+    response = AskResponse(
         answer=answer.answer,
         sources=[AskSource(**source.__dict__) for source in answer.sources],
+    )
+    if not answer.correction_failed:
+        history_entry = QuestionHistory(
+            collection_id=collection.id,
+            question=request.question,
+            strategy=request.strategy,
+            answer=response.answer,
+            sources=[source.model_dump(mode="json") for source in response.sources],
+        )
+        session.add(history_entry)
+        try:
+            session.commit()
+        except SQLAlchemyError:
+            session.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail="Não foi possível salvar a resposta no histórico.",
+            ) from None
+    return response
+
+
+@router.get(
+    "/{collection_id}/history",
+    response_model=AskHistoryPage,
+)
+def list_collection_history(
+    collection_id: UUID,
+    session: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> AskHistoryPage:
+    collection = _get_owned_collection(collection_id, user, session)
+    entries = session.scalars(
+        select(QuestionHistory)
+        .where(QuestionHistory.collection_id == collection.id)
+        .order_by(
+            desc(QuestionHistory.created_at),
+            desc(QuestionHistory.id),
+        )
+        .offset(offset)
+        .limit(limit + 1)
+    ).all()
+    has_more = len(entries) > limit
+    items = [
+        AskHistoryItem(
+            id=entry.id,
+            question=entry.question,
+            strategy=entry.strategy,
+            answer=entry.answer,
+            sources=[AskSource(**source) for source in entry.sources],
+            created_at=entry.created_at,
+        )
+        for entry in entries[:limit]
+    ]
+    return AskHistoryPage(
+        items=items,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
     )

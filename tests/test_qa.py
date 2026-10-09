@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
 from uuid import UUID
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from acervo_ia.db.connection import get_db
-from acervo_ia.db.models import Base, Collection, User
+from acervo_ia.db.models import Base, Collection, QuestionHistory, User
 from acervo_ia.main import app
 from acervo_ia.security import create_access_token
 from acervo_ia.services import chat as chat_service
@@ -317,6 +318,12 @@ def test_invalid_reference_after_one_correction_returns_safe_answer_without_sour
     assert "validar as fontes" in response.json()["answer"].lower()
     assert len(requests) == 2
     assert "S9" not in response.text
+    history = qa_client.get(
+        f"/collections/{collection_id}/history",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert history.status_code == 200
+    assert history.json()["items"] == []
 
 
 @pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
@@ -341,6 +348,59 @@ def test_chat_connection_failure_returns_generic_safe_error(
 
     assert response.status_code == 503
     assert "private Ollama endpoint detail" not in response.text
+    history = qa_client.get(
+        f"/collections/{collection_id}/history",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert history.status_code == 200
+    assert history.json()["items"] == []
+
+
+def test_rejected_model_output_is_not_saved_to_history(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_collection()
+    mock_retrieval(monkeypatch, [search_hit()])
+    mock_chat(monkeypatch, content="not-json")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Pergunta?"},
+        headers=headers,
+    )
+    history = qa_client.get(f"/collections/{collection_id}/history", headers=headers)
+
+    assert response.status_code == 502
+    assert history.status_code == 200
+    assert history.json()["items"] == []
+
+
+def test_embedding_failure_is_not_saved_to_history(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from acervo_ia.services.embeddings import EmbeddingServiceError
+
+    _, collection_id, token = create_collection()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise EmbeddingServiceError("private embedding endpoint")
+
+    monkeypatch.setattr(answering_service, "generate_embeddings", unavailable)
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Pergunta?", "strategy": "vector"},
+        headers=headers,
+    )
+    history = qa_client.get(f"/collections/{collection_id}/history", headers=headers)
+
+    assert response.status_code == 503
+    assert "private embedding endpoint" not in response.text
+    assert history.status_code == 200
+    assert history.json()["items"] == []
 
 
 def test_other_users_cannot_search_or_generate_answers_for_collection(
@@ -440,3 +500,195 @@ def test_ask_checks_owner_before_selected_search_strategy(
     )
 
     assert response.status_code == 404
+
+
+def test_successful_answer_is_saved_and_returned_by_owned_collection_history(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_collection()
+    mock_retrieval(monkeypatch, [search_hit(content="Use o botão azul.")])
+    mock_chat(
+        monkeypatch,
+        content=json.dumps(
+            {"answer": "Use o botão azul. [S1]", "citations": ["S1"]}
+        ),
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    ask = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Qual botão?", "strategy": "text"},
+        headers=headers,
+    )
+    history = qa_client.get(f"/collections/{collection_id}/history", headers=headers)
+
+    assert ask.status_code == 200
+    assert history.status_code == 200
+    payload = history.json()
+    assert payload["limit"] == 20
+    assert payload["offset"] == 0
+    assert payload["has_more"] is False
+    assert len(payload["items"]) == 1
+    item = payload["items"][0]
+    assert item["question"] == "Qual botão?"
+    assert item["strategy"] == "text"
+    assert item["answer"] == "Use o botão azul. [S1]"
+    assert item["sources"] == ask.json()["sources"]
+    assert item["created_at"]
+
+
+def test_successful_abstention_is_saved_but_failed_answers_are_not(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_collection()
+    headers = {"Authorization": f"Bearer {token}"}
+    mock_retrieval(monkeypatch, [])
+    mock_chat(monkeypatch, content="unused")
+
+    abstention = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Pergunta sem evidência?"},
+        headers=headers,
+    )
+    history = qa_client.get(f"/collections/{collection_id}/history", headers=headers)
+
+    assert abstention.status_code == 200
+    assert history.status_code == 200
+    assert len(history.json()["items"]) == 1
+    assert history.json()["items"][0]["sources"] == []
+    assert "evidência suficiente" in history.json()["items"][0]["answer"].lower()
+
+
+def test_history_is_paginated_and_repeated_questions_create_separate_entries(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_collection()
+    headers = {"Authorization": f"Bearer {token}"}
+    mock_retrieval(monkeypatch, [])
+    mock_chat(monkeypatch, content="unused")
+
+    for _ in range(3):
+        response = qa_client.post(
+            f"/collections/{collection_id}/ask",
+            json={"question": "Pergunta repetida?", "strategy": "hybrid"},
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+    first_page = qa_client.get(
+        f"/collections/{collection_id}/history?limit=2&offset=0",
+        headers=headers,
+    )
+    second_page = qa_client.get(
+        f"/collections/{collection_id}/history?limit=2&offset=2",
+        headers=headers,
+    )
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+    assert len(first_page.json()["items"]) == 2
+    assert first_page.json()["has_more"] is True
+    assert len(second_page.json()["items"]) == 1
+    assert second_page.json()["has_more"] is False
+    assert all(
+        item["question"] == "Pergunta repetida?"
+        and item["strategy"] == "hybrid"
+        for item in first_page.json()["items"] + second_page.json()["items"]
+    )
+    assert len(
+        {item["id"] for item in first_page.json()["items"] + second_page.json()["items"]}
+    ) == 3
+
+
+def test_history_orders_entries_from_newest_to_oldest(
+    qa_client: TestClient,
+) -> None:
+    _, collection_id, token = create_collection()
+    now = datetime.now(timezone.utc)
+    with app.state.test_session_factory() as session:
+        session.add_all(
+            [
+                QuestionHistory(
+                    id=UUID(int=101),
+                    collection_id=collection_id,
+                    question="Mais antiga",
+                    strategy="text",
+                    answer="A",
+                    sources=[],
+                    created_at=now - timedelta(days=1),
+                ),
+                QuestionHistory(
+                    id=UUID(int=102),
+                    collection_id=collection_id,
+                    question="Mais recente",
+                    strategy="vector",
+                    answer="B",
+                    sources=[],
+                    created_at=now,
+                ),
+                QuestionHistory(
+                    id=UUID(int=103),
+                    collection_id=collection_id,
+                    question="Intermediária",
+                    strategy="hybrid",
+                    answer="C",
+                    sources=[],
+                    created_at=now - timedelta(hours=1),
+                ),
+            ]
+        )
+        session.commit()
+
+    response = qa_client.get(
+        f"/collections/{collection_id}/history?limit=2",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert [item["question"] for item in response.json()["items"]] == [
+        "Mais recente",
+        "Intermediária",
+    ]
+    assert response.json()["has_more"] is True
+
+
+def test_history_requires_authentication_and_hides_other_users_collections(
+    qa_client: TestClient,
+) -> None:
+    _, collection_id, _ = create_collection("private-owner@example.test")
+    _, _, other_token = create_collection("other-user@example.test")
+
+    unauthenticated = qa_client.get(f"/collections/{collection_id}/history")
+    foreign = qa_client.get(
+        f"/collections/{collection_id}/history",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert foreign.status_code == 404
+
+
+def test_collection_deletion_removes_its_question_history(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, token = create_collection()
+    mock_retrieval(monkeypatch, [])
+    mock_chat(monkeypatch, content="unused")
+    headers = {"Authorization": f"Bearer {token}"}
+    answered = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Sem evidência?"},
+        headers=headers,
+    )
+    assert answered.status_code == 200
+
+    deleted = qa_client.delete(f"/collections/{collection_id}", headers=headers)
+
+    assert deleted.status_code == 204
+    assert qa_client.get(
+        f"/collections/{collection_id}/history", headers=headers
+    ).status_code == 404

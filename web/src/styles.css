@@ -213,6 +213,16 @@ input::placeholder, textarea::placeholder { color: #9aabad; }
 .source-page { margin-left: auto; color: #779095; font: 400 10px var(--mono); white-space: nowrap; }
 .source-snippet { margin: 0; padding: 14px 16px; color: #36565e; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .no-sources-note { margin-top: 17px; padding: 13px 16px; border-radius: 5px; color: #657c81; background: #eef3f3; font-size: 12px; line-height: 1.7; }
+.question-history { margin-top: 48px; padding-top: 26px; border-top: 1px solid var(--line); }
+.question-history > .query-empty-state { margin-top: 0; }
+.question-history-list { display: grid; gap: 13px; }
+.history-card { padding: 18px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.history-card-meta { display: flex; justify-content: space-between; gap: 14px; color: #71898e; font: 400 9px var(--mono); }
+.history-card h3 { margin: 12px 0 8px; color: #294a53; font-size: 14px; line-height: 1.5; }
+.history-answer { margin: 0; color: #4f6b71; font-size: 12px; line-height: 1.75; white-space: pre-wrap; }
+.history-source-list { margin-top: 14px; }
+.history-repeat-button, .history-more-button { margin-top: 14px; }
+.history-more-button { display: block; margin-inline: auto; }
 
 .loading-state { display: flex; align-items: center; gap: 10px; margin: 25px 0; color: #59747b; font-size: 12px; }
 .loading-mark { width: 15px; height: 15px; border: 2px solid #c9d8d9; border-top-color: var(--teal); border-radius: 50%; animation: spin .8s linear infinite; }

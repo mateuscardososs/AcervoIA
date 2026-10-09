@@ -36,6 +36,20 @@ export type AskSource = {
   snippet: string;
 };
 export type AskResponse = { answer: string; sources: AskSource[] };
+export type AskHistoryItem = {
+  id: string;
+  question: string;
+  strategy: SearchStrategy;
+  answer: string;
+  sources: AskSource[];
+  created_at: string;
+};
+export type AskHistoryPage = {
+  items: AskHistoryItem[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -177,6 +191,12 @@ export const api = {
     return request<AskResponse>(
       `/collections/${encodeURIComponent(collectionId)}/ask`,
       jsonBody({ question, limit: 5, strategy }),
+    );
+  },
+  questionHistory(collectionId: string, limit = 20, offset = 0) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return request<AskHistoryPage>(
+      `/collections/${encodeURIComponent(collectionId)}/history?${params.toString()}`,
     );
   },
 };

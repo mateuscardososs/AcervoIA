@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from acervo_ia import demo
 from acervo_ia.db.connection import DatabaseUnavailableError, get_engine
 from acervo_ia.db.models import User
 from acervo_ia.security import hash_password
@@ -92,5 +93,95 @@ def create_user() -> int:
     return 0
 
 
+def seed_demo() -> int:
+    if demo.DEMO_STATE_PATH.exists():
+        print(
+            "A demonstração local já está preparada; execute demo-clean antes de recriá-la.",
+            file=sys.stderr,
+        )
+        return 1
+
+    password = _read_hidden_password("Senha da conta de demonstração: ")
+    if password is None:
+        return 2
+    confirmation = _read_hidden_password("Confirme a senha: ")
+    if confirmation is None:
+        return 2
+    if not password:
+        print("A senha não pode ficar vazia.", file=sys.stderr)
+        return 2
+    if password != confirmation:
+        print("As senhas não coincidem.", file=sys.stderr)
+        return 2
+
+    try:
+        result = demo.seed_demo(password)
+    except demo.DemoDataError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (DatabaseUnavailableError, SQLAlchemyError):
+        print(
+            "Não foi possível preparar a demonstração local; verifique o banco.",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        password = ""
+        confirmation = ""
+
+    print("Demonstração local preparada com dados fictícios.")
+    print(f"Conta para entrar: {result.email}")
+    print("A senha foi escolhida no prompt e não foi armazenada em texto puro.")
+    return 0
+
+
+def clean_demo() -> int:
+    try:
+        result = demo.clean_demo()
+    except demo.DemoDataError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (DatabaseUnavailableError, SQLAlchemyError):
+        print(
+            "Não foi possível limpar a demonstração local; manifesto preservado.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if result.document_count == 0 and result.file_count == 0:
+        print("Nenhuma demonstração local foi encontrada.")
+        return 0
+    print(
+        "Dados fictícios da demonstração removidos: "
+        f"{result.document_count} documento(s), {result.file_count} arquivo(s)."
+    )
+    if not result.collection_removed or not result.user_removed:
+        print(
+            "A conta ou coleção foi preservada para proteger dados ou alterações "
+            "adicionais; revise antes de qualquer exclusão manual."
+        )
+    else:
+        print("Conta e coleção da demonstração também foram removidas.")
+    return 0
+
+
+def main() -> int:
+    project_root = Path(__file__).resolve().parents[2]
+    load_dotenv(project_root / ".env")
+
+    arguments = sys.argv[1:]
+    if not arguments:
+        return create_user()
+    if arguments == ["demo-seed"]:
+        return seed_demo()
+    if arguments == ["demo-clean"]:
+        return clean_demo()
+    print(
+        "Uso: python -m acervo_ia.cli [demo-seed|demo-clean]",
+        file=sys.stderr,
+    )
+    return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(create_user())
+    raise SystemExit(main())

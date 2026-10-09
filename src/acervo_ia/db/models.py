@@ -62,6 +62,10 @@ class Collection(Base):
         back_populates="collection",
         cascade="all, delete-orphan",
     )
+    question_history: Mapped[list["QuestionHistory"]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
 
 
 class Document(Base):
@@ -139,6 +143,35 @@ class DocumentChunk(Base):
     embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
+
+
+class QuestionHistory(Base):
+    __tablename__ = "question_history"
+    __table_args__ = (
+        CheckConstraint(
+            "strategy IN ('vector', 'text', 'hybrid')",
+            name="ck_question_history_strategy",
+        ),
+        Index(
+            "ix_question_history_collection_created_at",
+            "collection_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    collection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE")
+    )
+    question: Mapped[str] = mapped_column(Text)
+    strategy: Mapped[str] = mapped_column(String(10))
+    answer: Mapped[str] = mapped_column(Text)
+    sources: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    collection: Mapped["Collection"] = relationship(back_populates="question_history")
 
 
 Index(

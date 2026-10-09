@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import {
   api,
   ApiError,
+  type AskHistoryItem,
   type AskResponse,
   type Collection,
   type SearchStrategy,
@@ -15,6 +16,7 @@ const STRATEGIES: { id: SearchStrategy; label: string }[] = [
   { id: "text", label: "Textual" },
   { id: "hybrid", label: "Híbrida" },
 ];
+const HISTORY_PAGE_SIZE = 20;
 
 export function AskPage() {
   const { collectionId = "" } = useParams();
@@ -25,23 +27,47 @@ export function AskPage() {
   const [asking, setAsking] = useState(false);
   const [answer, setAnswer] = useState<AskResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<AskHistoryItem[]>([]);
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  async function loadHistoryPage(offset = 0, append = false) {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const page = await api.questionHistory(collectionId, HISTORY_PAGE_SIZE, offset);
+      setHistory((current) => append ? [...current, ...page.items] : page.items);
+      setHistoryOffset(offset + page.items.length);
+      setHistoryHasMore(page.has_more);
+    } catch {
+      setHistoryError("Não foi possível carregar o histórico desta coleção.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
 
   useEffect(() => {
     let current = true;
     api.collection(collectionId)
-      .then((data) => { if (current) setCollection(data); })
+      .then((data) => {
+        if (!current) return;
+        setCollection(data);
+        void loadHistoryPage();
+      })
       .catch(() => { if (current) setError("Não foi possível abrir esta coleção."); })
       .finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
   }, [collectionId]);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function askQuestion(questionText: string, selectedStrategy: SearchStrategy) {
     setAsking(true);
     setAnswer(null);
     setError(null);
     try {
-      setAnswer(await api.ask(collectionId, question.trim(), strategy));
+      setAnswer(await api.ask(collectionId, questionText, selectedStrategy));
+      await loadHistoryPage();
     } catch (cause) {
       setError(cause instanceof ApiError && cause.status === 503
         ? "O serviço local de IA (Ollama) está indisponível. Confira se está em execução e se os modelos configurados de embeddings e chat foram instalados."
@@ -53,6 +79,17 @@ export function AskPage() {
     } finally {
       setAsking(false);
     }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await askQuestion(question.trim(), strategy);
+  }
+
+  async function askAgain(item: AskHistoryItem) {
+    setQuestion(item.question);
+    setStrategy(item.strategy);
+    await askQuestion(item.question, item.strategy);
   }
 
   if (loading) return <div className="page-content"><LoadingState label="Preparando consulta…" /></div>;
@@ -137,6 +174,57 @@ export function AskPage() {
           <div><p className="eyebrow">PRONTO PARA CONSULTAR</p><p>Faça uma pergunta específica. As fontes aparecem junto da resposta.</p></div>
         </section>
       )}
+
+      <section aria-labelledby="history-heading" className="question-history">
+        <div className="section-heading">
+          <div><p className="eyebrow">CONSULTAS ANTERIORES</p><h2 id="history-heading">Histórico da coleção</h2></div>
+          <span className="mono-label">{history.length.toString().padStart(2, "0")} REGISTROS</span>
+        </div>
+        {historyError && <p className="notice notice-error" role="status">{historyError}</p>}
+        {historyLoading && history.length === 0 ? (
+          <LoadingState label="Carregando histórico…" />
+        ) : history.length === 0 ? (
+          <p className="query-empty-state" role="status">As respostas válidas e abstenções desta coleção aparecerão aqui.</p>
+        ) : (
+          <div className="question-history-list">
+            {history.map((item) => (
+              <article className="history-card" key={item.id}>
+                <div className="history-card-meta">
+                  <span>{item.strategy.toUpperCase()}</span>
+                  <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+                </div>
+                <h3>{item.question}</h3>
+                <p className="history-answer">{item.answer}</p>
+                {item.sources.length > 0 && (
+                  <div className="source-list history-source-list">
+                    {item.sources.map((source) => (
+                      <SourceCard key={`${item.id}-${source.source_id}`} source={source} />
+                    ))}
+                  </div>
+                )}
+                <button
+                  className="button button-secondary history-repeat-button"
+                  disabled={asking}
+                  onClick={() => void askAgain(item)}
+                  type="button"
+                >
+                  Consultar novamente
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+        {historyHasMore && (
+          <button
+            className="button button-secondary history-more-button"
+            disabled={historyLoading}
+            onClick={() => void loadHistoryPage(historyOffset, true)}
+            type="button"
+          >
+            {historyLoading ? "Carregando…" : "Carregar perguntas anteriores"}
+          </button>
+        )}
+      </section>
     </div>
   );
 }

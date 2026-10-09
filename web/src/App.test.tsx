@@ -210,6 +210,50 @@ describe("AcervoIA web flows", () => {
     await waitFor(() => expect(askedWith).toEqual(["vector", "text", "hybrid"]));
   });
 
+  it("shows saved questions with sources and lets the user ask one again", async () => {
+    authenticate();
+    const asked: Array<{ question: string; strategy: string; limit: number }> = [];
+    const savedQuestion = {
+      id: "h-1",
+      question: "Qual é o procedimento salvo?",
+      strategy: "hybrid",
+      answer: "Desligue antes da limpeza. [S1]",
+      sources: [
+        {
+          source_id: "S1",
+          document_id: "d-1",
+          document_name: "historico.txt",
+          page_number: 3,
+          snippet: "Desligue o equipamento antes de limpar.",
+        },
+      ],
+      created_at: "2026-10-06T12:00:00Z",
+    };
+    installFetch((path, init) => {
+      if (path === "/auth/me") return jsonResponse(user);
+      if (path === "/collections/c-1") return jsonResponse(collection);
+      if (path === "/collections/c-1/history") {
+        return jsonResponse({ items: [savedQuestion], limit: 20, offset: 0, has_more: false });
+      }
+      if (path === "/collections/c-1/ask") {
+        asked.push(JSON.parse(String(init.body)) as { question: string; strategy: string; limit: number });
+        return jsonResponse({ answer: "Consulta atualizada.", sources: [] });
+      }
+      return jsonResponse({ detail: "not found" }, 404);
+    });
+    const actor = userEvent.setup();
+    mount("/collections/c-1/ask");
+
+    expect(await screen.findByText("Qual é o procedimento salvo?")).toBeVisible();
+    const historicalSource = screen.getByRole("article", { name: "Fonte S1" });
+    expect(within(historicalSource).getByText("historico.txt")).toBeVisible();
+    expect(within(historicalSource).getByText("Página 3")).toBeVisible();
+    await actor.click(screen.getByRole("button", { name: /consultar novamente/i }));
+
+    expect(await screen.findByText("Consulta atualizada.")).toBeVisible();
+    expect(asked).toEqual([{ question: savedQuestion.question, strategy: "hybrid", limit: 5 }]);
+  });
+
   it("explains Ollama unavailability on a question without leaking a stack trace", async () => {
     authenticate();
     installFetch((path) => {

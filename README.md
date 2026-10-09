@@ -10,7 +10,7 @@ O projeto está em desenvolvimento e foi validado localmente. Não há evidênci
 2. Envia um PDF, DOCX ou TXT (até 20 MiB) para uma coleção. Um hash SHA-256 permite reutilizar o mesmo documento dentro da mesma coleção sem duplicá-lo.
 3. A API extrai o texto e o divide em trechos sobrepostos. Para PDFs, registra a página quando disponível.
 4. A API envia os trechos ao Ollama local para gerar embeddings e os guarda no PostgreSQL com pgvector.
-5. A pessoa escolhe o modo de busca e faz uma pergunta. A API recupera trechos, pede uma resposta fundamentada ao modelo local e retorna fontes construídas e validadas pelo backend.
+5. A pessoa escolhe o modo de busca e faz uma pergunta. A API recupera trechos, pede uma resposta fundamentada ao modelo local e retorna fontes construídas e validadas pelo backend. Respostas aceitas e abstenções ficam no histórico privado da coleção, com opção de consultar novamente.
 
 Os dados de cada conta são isolados pelo usuário associado ao token; o cliente não escolhe o proprietário. O conteúdo dos documentos é tratado como dado não confiável, nunca como instrução para o modelo.
 
@@ -89,6 +89,24 @@ python -m acervo_ia.cli
 
 O comando solicita o e-mail e lê a senha sem exibi-la. Faça login em `POST /auth/token` usando o e-mail no campo OAuth2 `username`; use o bearer token nas rotas protegidas. `GET /auth/me` confirma a identidade autenticada.
 
+### Demonstração local com dados fictícios
+
+Para preparar um fluxo demonstrável sem remover o login nem criar uma senha padrão, execute na raiz, com o banco migrado:
+
+```bash
+python -m acervo_ia.cli demo-seed
+```
+
+O comando cria uma conta com e-mail local aleatório e pede que você escolha a senha pelo prompt oculto. Ele adiciona uma coleção marcada **DEMO LOCAL** e os dois manuais TXT fictícios de `data/demo/`, com nomes também marcados como **DEMO FICTÍCIO**. Nenhum registro existente é atualizado. Entre pela tela normal de login usando o e-mail exibido no terminal e a senha que escolheu. Os documentos começam pendentes; para perguntar sobre eles, processe-os e gere embeddings pela interface com Ollama disponível.
+
+Para remover apenas os itens que o seed criou:
+
+```bash
+python -m acervo_ia.cli demo-clean
+```
+
+Um manifesto local ignorado pelo Git guarda os IDs e as chaves internas desses itens, sem senha. A limpeza valida esse manifesto e remove somente os documentos, arquivos, coleção e conta correspondentes. Se você adicionar outros documentos ou coleções à conta de demonstração, os dados adicionais são preservados; a conta ou coleção também permanece quando ainda contém dados. Em caso de arquivo alterado ou manifesto inválido, a operação interrompe a limpeza em vez de ampliar o alvo. Execute `demo-clean` antes de preparar novamente a demonstração. A conta é apenas para desenvolvimento local, não tem credenciais padrão e não habilita bypass de autenticação.
+
 ### Interface web
 
 Com API, PostgreSQL, conta e Ollama disponíveis:
@@ -119,6 +137,7 @@ Exceto pelos endpoints de saúde e login, as rotas abaixo exigem bearer token. R
 | `POST /collections/{collection_id}/documents/{document_id}/embeddings` | Gerar ou atualizar vetores dos trechos. |
 | `POST /collections/{collection_id}/search` | Recuperar trechos no modo `vector`, `text` ou `hybrid`. |
 | `POST /collections/{collection_id}/ask` | Fazer uma pergunta e retornar resposta com fontes validadas. |
+| `GET /collections/{collection_id}/history` | Listar perguntas e respostas próprias, com paginação por `limit` e `offset`. |
 
 `/search` usa `hybrid` quando nenhum modo é informado; `/ask` e a interface começam em `vector`. Nos dois fluxos é possível selecionar `vector`, `text` ou `hybrid`.
 
@@ -164,7 +183,7 @@ Interprete os números com cautela: a amostra tem só 25 exemplos respondíveis 
 
 Implementado: autenticação local sem cadastro público, coleções isoladas por conta, upload idempotente por conteúdo dentro da coleção, extração síncrona e chunking, embeddings via Ollama, busca vetorial/textual/híbrida e respostas fundamentadas com validação estrita das fontes.
 
-Ainda não implementado: cadastro público, recuperação de senha, OCR, fila de processamento em segundo plano, histórico ou continuidade de conversa, interface administrativa ou integração com outros serviços.
+Ainda não implementado: cadastro público, recuperação de senha, OCR, fila de processamento em segundo plano, continuidade de conversa com contexto entre perguntas, interface administrativa ou integração com outros serviços.
 
 Limitações atuais: arquivos suportados apenas em PDF, DOCX e TXT até 20 MiB; armazenamento de arquivos é local ao host e não é uma solução compartilhada/replicada; os modelos de embedding precisam produzir vetores de 768 dimensões; os benchmarks são pequenos e sintéticos. Não há validação documentada de implantação, monitoramento, backup/recuperação, segurança operacional ou desempenho para produção. A aplicação não deve ser tratada como publicada ou pronta para produção com base neste repositório.
 
