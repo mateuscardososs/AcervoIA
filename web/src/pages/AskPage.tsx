@@ -6,6 +6,7 @@ import {
   type AskHistoryItem,
   type AskResponse,
   type Collection,
+  type DocumentRecord,
   type SearchStrategy,
 } from "../api/client";
 import { LoadingState } from "../components/LoadingState";
@@ -21,6 +22,10 @@ const HISTORY_PAGE_SIZE = 20;
 export function AskPage() {
   const { collectionId = "" } = useParams();
   const [collection, setCollection] = useState<Collection | null>(null);
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(true);
+  const [documentsError, setDocumentsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [question, setQuestion] = useState("");
   const [strategy, setStrategy] = useState<SearchStrategy>("vector");
@@ -52,10 +57,20 @@ export function AskPage() {
 
   useEffect(() => {
     let current = true;
+    setDocuments([]);
+    setSelectedDocumentIds([]);
+    setDocumentsLoading(true);
+    setDocumentsError(null);
     api.collection(collectionId)
       .then((data) => {
         if (!current) return;
         setCollection(data);
+        void api.documents(collectionId)
+          .then((items) => { if (current) setDocuments(items); })
+          .catch(() => {
+            if (current) setDocumentsError("Não foi possível carregar os documentos para filtrar a consulta.");
+          })
+          .finally(() => { if (current) setDocumentsLoading(false); });
         void loadHistoryPage();
       })
       .catch(() => { if (current) setError("Não foi possível abrir esta coleção."); })
@@ -63,12 +78,16 @@ export function AskPage() {
     return () => { current = false; };
   }, [collectionId]);
 
-  async function askQuestion(questionText: string, selectedStrategy: SearchStrategy) {
+  async function askQuestion(
+    questionText: string,
+    selectedStrategy: SearchStrategy,
+    documentIds = selectedDocumentIds,
+  ) {
     setAsking(true);
     setAnswer(null);
     setError(null);
     try {
-      setAnswer(await api.ask(collectionId, questionText, selectedStrategy));
+      setAnswer(await api.ask(collectionId, questionText, selectedStrategy, documentIds));
       await loadHistoryPage();
     } catch (cause) {
       setError(cause instanceof ApiError && cause.status === 503
@@ -91,7 +110,15 @@ export function AskPage() {
   async function askAgain(item: AskHistoryItem) {
     setQuestion(item.question);
     setStrategy(item.strategy);
-    await askQuestion(item.question, item.strategy);
+    const documentIds = item.document_ids ?? [];
+    setSelectedDocumentIds(documentIds);
+    await askQuestion(item.question, item.strategy, documentIds);
+  }
+
+  function toggleDocument(documentId: string) {
+    setSelectedDocumentIds((selected) => selected.includes(documentId)
+      ? selected.filter((item) => item !== documentId)
+      : [...selected, documentId]);
   }
 
   async function openSourceDocument(source: AskResponse["sources"][number]) {
@@ -177,6 +204,45 @@ export function AskPage() {
             {asking ? "Consultando…" : "Perguntar"}<span aria-hidden="true">→</span>
           </button>
         </div>
+        <fieldset className="document-filter">
+          <legend>Limitar a documentos</legend>
+          <div className="document-filter-heading">
+            <button
+              className="button button-secondary document-filter-clear"
+              disabled={selectedDocumentIds.length === 0}
+              onClick={() => setSelectedDocumentIds([])}
+              type="button"
+            >
+              Limpar seleção
+            </button>
+          </div>
+          <p className="document-filter-help">
+            {selectedDocumentIds.length === 0
+              ? "Nenhum selecionado: a busca usa todos os documentos da coleção."
+              : `${selectedDocumentIds.length} ${selectedDocumentIds.length === 1 ? "documento selecionado" : "documentos selecionados"}.`}
+          </p>
+          {documentsLoading ? (
+            <p className="document-filter-empty" role="status">Carregando documentos…</p>
+          ) : documentsError ? (
+            <p className="document-filter-empty" role="status">{documentsError}</p>
+          ) : documents.length === 0 ? (
+            <p className="document-filter-empty">Esta coleção ainda não tem documentos.</p>
+          ) : (
+            <div className="document-filter-list">
+              {documents.map((document) => (
+                <label className="document-filter-option" key={document.id}>
+                  <input
+                    checked={selectedDocumentIds.includes(document.id)}
+                    onChange={() => toggleDocument(document.id)}
+                    type="checkbox"
+                    value={document.id}
+                  />
+                  <span>{document.original_filename}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </fieldset>
         <p className="query-note">A resposta usa somente os documentos desta coleção e mostra os trechos recuperados.</p>
       </form>
 
@@ -244,6 +310,13 @@ export function AskPage() {
                 </div>
                 <h3>{item.question}</h3>
                 <p className="history-answer">{item.answer}</p>
+                {item.document_ids?.length > 0 && (
+                  <p className="history-filter-scope">
+                    Escopo: {item.document_ids.map((id) => (
+                      documents.find((document) => document.id === id)?.original_filename ?? id
+                    )).join(", ")}
+                  </p>
+                )}
                 {item.sources.length > 0 && (
                   <div className="source-list history-source-list">
                     {item.sources.map((source) => (

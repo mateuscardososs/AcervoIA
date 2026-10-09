@@ -213,12 +213,13 @@ describe("AcervoIA web flows", () => {
 
   it("shows saved questions with sources and lets the user ask one again", async () => {
     authenticate();
-    const asked: Array<{ question: string; strategy: string; limit: number }> = [];
+    const asked: Array<{ question: string; strategy: string; limit: number; document_ids: string[] }> = [];
     const savedQuestion = {
       id: "h-1",
       question: "Qual é o procedimento salvo?",
       strategy: "hybrid",
       answer: "Desligue antes da limpeza. [S1]",
+      document_ids: ["d-1"],
       sources: [
         {
           source_id: "S1",
@@ -233,11 +234,14 @@ describe("AcervoIA web flows", () => {
     installFetch((path, init) => {
       if (path === "/auth/me") return jsonResponse(user);
       if (path === "/collections/c-1") return jsonResponse(collection);
+      if (path === "/collections/c-1/documents") {
+        return jsonResponse([{ ...documentRecord, id: "d-1", original_filename: "historico.txt" }]);
+      }
       if (path === "/collections/c-1/history") {
         return jsonResponse({ items: [savedQuestion], limit: 20, offset: 0, has_more: false });
       }
       if (path === "/collections/c-1/ask") {
-        asked.push(JSON.parse(String(init.body)) as { question: string; strategy: string; limit: number });
+        asked.push(JSON.parse(String(init.body)) as { question: string; strategy: string; limit: number; document_ids: string[] });
         return jsonResponse({ answer: "Consulta atualizada.", sources: [] });
       }
       return jsonResponse({ detail: "not found" }, 404);
@@ -252,7 +256,50 @@ describe("AcervoIA web flows", () => {
     await actor.click(screen.getByRole("button", { name: /consultar novamente/i }));
 
     expect(await screen.findByText("Consulta atualizada.")).toBeVisible();
-    expect(asked).toEqual([{ question: savedQuestion.question, strategy: "hybrid", limit: 5 }]);
+    expect(asked).toEqual([{
+      question: savedQuestion.question,
+      strategy: "hybrid",
+      limit: 5,
+      document_ids: ["d-1"],
+    }]);
+  });
+
+  it("selects multiple documents for questions and clears to the full collection", async () => {
+    authenticate();
+    const asks: Array<Record<string, unknown>> = [];
+    installFetch((path, init) => {
+      if (path === "/auth/me") return jsonResponse(user);
+      if (path === "/collections/c-1") return jsonResponse(collection);
+      if (path === "/collections/c-1/documents") {
+        return jsonResponse([
+          { ...documentRecord, id: "d-1", original_filename: "manual-a.txt" },
+          { ...documentRecord, id: "d-2", original_filename: "manual-b.pdf" },
+          { ...documentRecord, id: "d-3", original_filename: "manual-c.docx" },
+        ]);
+      }
+      if (path === "/collections/c-1/history") {
+        return jsonResponse({ items: [], limit: 20, offset: 0, has_more: false });
+      }
+      if (path === "/collections/c-1/ask") {
+        asks.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ answer: "Resposta", sources: [] });
+      }
+      return jsonResponse({ detail: "not found" }, 404);
+    });
+    const actor = userEvent.setup();
+    mount("/collections/c-1/ask");
+
+    await actor.type(await screen.findByLabelText("Sua pergunta"), "Como operar?");
+    await actor.click(await screen.findByLabelText("manual-a.txt"));
+    await actor.click(screen.getByLabelText("manual-b.pdf"));
+    await actor.click(screen.getByRole("button", { name: "Perguntar" }));
+    await screen.findByText("Resposta");
+    expect(asks[0]).toMatchObject({ document_ids: ["d-1", "d-2"] });
+
+    await actor.click(screen.getByRole("button", { name: "Limpar seleção" }));
+    await actor.click(screen.getByRole("button", { name: "Perguntar" }));
+    await waitFor(() => expect(asks).toHaveLength(2));
+    expect(asks[1]).toMatchObject({ document_ids: [] });
   });
 
   it("opens a cited PDF at its page and downloads a cited text file from history", async () => {

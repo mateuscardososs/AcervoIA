@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from uuid import UUID
 
@@ -68,9 +69,10 @@ def build_search_statement(
     embedding: list[float],
     embedding_model: str,
     limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> Select[tuple[DocumentChunk, Document, float]]:
     distance = DocumentChunk.embedding.cosine_distance(embedding).label("distance")
-    return (
+    statement = (
         select(DocumentChunk, Document, distance)
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(
@@ -78,9 +80,10 @@ def build_search_statement(
             DocumentChunk.embedding.is_not(None),
             DocumentChunk.embedding_model == embedding_model,
         )
-        .order_by(distance)
-        .limit(limit)
     )
+    if document_ids:
+        statement = statement.where(Document.id.in_(document_ids))
+    return statement.order_by(distance).limit(limit)
 
 
 def search_chunks(
@@ -90,6 +93,7 @@ def search_chunks(
     embedding: list[float],
     embedding_model: str,
     limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
     rows = session.execute(
         build_search_statement(
@@ -97,6 +101,7 @@ def search_chunks(
             embedding=embedding,
             embedding_model=embedding_model,
             limit=limit,
+            document_ids=document_ids,
         )
     ).all()
     return [
@@ -106,41 +111,61 @@ def search_chunks(
 
 
 def build_full_text_statement(
-    *, collection_id: UUID, query: str, limit: int
+    *,
+    collection_id: UUID,
+    query: str,
+    limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> Select[tuple[DocumentChunk, Document, float]]:
     config = literal_column("'simple'")
     vector = func.to_tsvector(config, DocumentChunk.content)
     tsquery = func.websearch_to_tsquery(config, query)
     rank = func.ts_rank_cd(vector, tsquery).label("rank")
-    return (
+    statement = (
         select(DocumentChunk, Document, rank)
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(Document.collection_id == collection_id, vector.op("@@")(tsquery))
-        .order_by(desc(rank), DocumentChunk.position, DocumentChunk.id)
-        .limit(limit)
     )
+    if document_ids:
+        statement = statement.where(Document.id.in_(document_ids))
+    return statement.order_by(desc(rank), DocumentChunk.position, DocumentChunk.id).limit(limit)
 
 
 def search_full_text_chunks(
-    session: Session, *, collection_id: UUID, query: str, limit: int
+    session: Session,
+    *,
+    collection_id: UUID,
+    query: str,
+    limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
     rows = session.execute(
-        build_full_text_statement(collection_id=collection_id, query=query, limit=limit)
+        build_full_text_statement(
+            collection_id=collection_id,
+            query=query,
+            limit=limit,
+            document_ids=document_ids,
+        )
     ).all()
     return [_hit_from_row(chunk, document, float(rank)) for chunk, document, rank in rows]
 
 
 def search_literal_chunks(
-    session: Session, *, collection_id: UUID, query: str, limit: int
+    session: Session,
+    *,
+    collection_id: UUID,
+    query: str,
+    limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
     query_terms = extract_literal_terms(query)
     if not query_terms:
         return []
     rows = session.execute(
-        select(DocumentChunk, Document)
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .where(Document.collection_id == collection_id)
-        .order_by(DocumentChunk.position, DocumentChunk.id)
+        build_literal_statement(
+            collection_id=collection_id,
+            document_ids=document_ids,
+        )
     ).all()
     matches: list[SearchHit] = []
     for chunk, document in rows:
@@ -151,6 +176,20 @@ def search_literal_chunks(
             )
     matches.sort(key=lambda hit: (-hit.score, hit.position, str(hit.chunk_id)))
     return matches[:limit]
+
+
+def build_literal_statement(
+    *, collection_id: UUID, document_ids: Sequence[UUID] | None = None
+) -> Select[tuple[DocumentChunk, Document]]:
+    statement = (
+        select(DocumentChunk, Document)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.collection_id == collection_id)
+        .order_by(DocumentChunk.position, DocumentChunk.id)
+    )
+    if document_ids:
+        statement = statement.where(Document.id.in_(document_ids))
+    return statement
 
 
 def fuse_rankings(
@@ -183,7 +222,12 @@ def fuse_rankings(
 
 
 def search_text_chunks(
-    session: Session, *, collection_id: UUID, query: str, limit: int
+    session: Session,
+    *,
+    collection_id: UUID,
+    query: str,
+    limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
     # Oversample the component lists so RRF can still fill the requested page.
     component_limit = max(limit * 4, 20)
@@ -194,12 +238,14 @@ def search_text_chunks(
                 collection_id=collection_id,
                 query=query,
                 limit=component_limit,
+                document_ids=document_ids,
             ),
             search_literal_chunks(
                 session,
                 collection_id=collection_id,
                 query=query,
                 limit=component_limit,
+                document_ids=document_ids,
             ),
         ],
         limit=limit,
@@ -214,6 +260,7 @@ def search_hybrid_chunks(
     embedding: list[float],
     embedding_model: str,
     limit: int,
+    document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
     component_limit = max(limit * 4, 20)
     return fuse_rankings(
@@ -224,12 +271,14 @@ def search_hybrid_chunks(
                 embedding=embedding,
                 embedding_model=embedding_model,
                 limit=component_limit,
+                document_ids=document_ids,
             ),
             search_text_chunks(
                 session,
                 collection_id=collection_id,
                 query=query,
                 limit=component_limit,
+                document_ids=document_ids,
             ),
         ],
         limit=limit,

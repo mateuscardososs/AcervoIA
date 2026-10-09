@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from acervo_ia import config
+from acervo_ia.api.document_scope import validate_document_filter
 from acervo_ia.db.connection import get_db
 from acervo_ia.db.models import Collection, Document, DocumentChunk, User
 from acervo_ia.security import get_current_user
@@ -35,6 +36,7 @@ class SemanticSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4_000)
     limit: int = Field(default=5, ge=1, le=20)
     strategy: Literal["vector", "text", "hybrid"] = "hybrid"
+    document_ids: list[UUID] = Field(default_factory=list)
 
 
 class SearchResult(BaseModel):
@@ -142,13 +144,19 @@ def search_collection(
     user: Annotated[User, Depends(get_current_user)],
 ) -> SemanticSearchResponse:
     # Check tenant ownership before calling Ollama or querying vector results.
-    _get_owned_collection(collection_id, user, session)
+    collection = _get_owned_collection(collection_id, user, session)
+    document_ids = validate_document_filter(
+        session,
+        collection_id=collection.id,
+        document_ids=request.document_ids,
+    )
     if request.strategy == "text":
         hits: list[SearchHit] = search_text_chunks(
             session,
             collection_id=collection_id,
             query=request.query,
             limit=request.limit,
+            document_ids=document_ids,
         )
     else:
         query_vector = _generate([request.query])[0]
@@ -159,6 +167,7 @@ def search_collection(
                 embedding=query_vector,
                 embedding_model=config.OLLAMA_EMBEDDING_MODEL,
                 limit=request.limit,
+                document_ids=document_ids,
             )
         else:
             hits = search_hybrid_chunks(
@@ -168,7 +177,11 @@ def search_collection(
                 embedding=query_vector,
                 embedding_model=config.OLLAMA_EMBEDDING_MODEL,
                 limit=request.limit,
+                document_ids=document_ids,
             )
+    if document_ids:
+        allowed_document_ids = set(document_ids)
+        hits = [hit for hit in hits if hit.document_id in allowed_document_ids]
     return SemanticSearchResponse(
         results=[SearchResult.model_validate(hit.__dict__) for hit in hits]
     )

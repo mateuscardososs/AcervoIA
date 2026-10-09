@@ -40,6 +40,7 @@ export type AskHistoryItem = {
   id: string;
   question: string;
   strategy: SearchStrategy;
+  document_ids: string[];
   answer: string;
   sources: AskSource[];
   created_at: string;
@@ -203,10 +204,15 @@ export const api = {
       { method: "POST" },
     );
   },
-  ask(collectionId: string, question: string, strategy: SearchStrategy) {
+  ask(
+    collectionId: string,
+    question: string,
+    strategy: SearchStrategy,
+    documentIds: string[] = [],
+  ) {
     return request<AskResponse>(
       `/collections/${encodeURIComponent(collectionId)}/ask`,
-      jsonBody({ question, limit: 5, strategy }),
+      jsonBody({ question, limit: 5, strategy, document_ids: documentIds }),
     );
   },
   questionHistory(collectionId: string, limit = 20, offset = 0) {

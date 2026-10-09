@@ -8,6 +8,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from acervo_ia.api.document_scope import validate_document_filter
 from acervo_ia.db.connection import get_db
 from acervo_ia.db.models import Collection, QuestionHistory, User
 from acervo_ia.security import get_current_user
@@ -27,6 +28,7 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4_000)
     limit: int = Field(default=5, ge=1, le=10)
     strategy: Literal["vector", "text", "hybrid"] = "vector"
+    document_ids: list[UUID] = Field(default_factory=list)
 
 
 class AskSource(BaseModel):
@@ -46,6 +48,7 @@ class AskHistoryItem(BaseModel):
     id: UUID
     question: str
     strategy: Literal["vector", "text", "hybrid"]
+    document_ids: list[UUID]
     answer: str
     sources: list[AskSource]
     created_at: datetime
@@ -83,6 +86,11 @@ def ask_collection(
 ) -> AskResponse:
     # Enforce tenant ownership before embedding, searching, or using the chat model.
     collection = _get_owned_collection(collection_id, user, session)
+    document_ids = validate_document_filter(
+        session,
+        collection_id=collection.id,
+        document_ids=request.document_ids,
+    )
     try:
         answer = question_answering.answer_question(
             session,
@@ -90,6 +98,7 @@ def ask_collection(
             question=request.question,
             limit=request.limit,
             strategy=request.strategy,
+            document_ids=document_ids,
         )
     except EmbeddingDimensionError:
         raise HTTPException(
@@ -117,6 +126,7 @@ def ask_collection(
             collection_id=collection.id,
             question=request.question,
             strategy=request.strategy,
+            document_ids=[str(document_id) for document_id in document_ids or []],
             answer=response.answer,
             sources=[source.model_dump(mode="json") for source in response.sources],
         )
@@ -160,6 +170,7 @@ def list_collection_history(
             id=entry.id,
             question=entry.question,
             strategy=entry.strategy,
+            document_ids=[UUID(document_id) for document_id in entry.document_ids],
             answer=entry.answer,
             sources=[AskSource(**source) for source in entry.sources],
             created_at=entry.created_at,

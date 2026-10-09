@@ -10,7 +10,7 @@ O projeto está em desenvolvimento e foi validado localmente. Não há evidênci
 2. Envia um PDF, DOCX ou TXT (até 20 MiB) para uma coleção. Um hash SHA-256 permite reutilizar o mesmo documento dentro da mesma coleção sem duplicá-lo.
 3. A API extrai o texto e o divide em trechos sobrepostos. Para PDFs, registra a página quando disponível.
 4. A API envia os trechos ao Ollama local para gerar embeddings e os guarda no PostgreSQL com pgvector.
-5. A pessoa escolhe o modo de busca e faz uma pergunta. A API recupera trechos, pede uma resposta fundamentada ao modelo local e retorna fontes construídas e validadas pelo backend. Respostas aceitas e abstenções ficam no histórico privado da coleção, com opção de consultar novamente.
+5. A pessoa escolhe o modo de busca, pode limitar a consulta a um ou mais documentos e faz uma pergunta. Sem seleção, a coleção inteira continua no escopo. A API recupera trechos, pede uma resposta fundamentada ao modelo local e retorna fontes construídas e validadas pelo backend. Respostas aceitas e abstenções ficam no histórico privado da coleção com o escopo documental, permitindo consultar novamente com os mesmos filtros.
 
 Os dados de cada conta são isolados pelo usuário associado ao token; o cliente não escolhe o proprietário. O conteúdo dos documentos é tratado como dado não confiável, nunca como instrução para o modelo. Nas fontes da resposta e do histórico, é possível abrir o PDF na página citada ou baixar o DOCX/TXT original; a API confere novamente a propriedade antes de entregar o arquivo.
 

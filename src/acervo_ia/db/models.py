@@ -165,6 +165,12 @@ class QuestionHistory(Base):
     )
     question: Mapped[str] = mapped_column(Text)
     strategy: Mapped[str] = mapped_column(String(10))
+    document_ids: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     answer: Mapped[str] = mapped_column(Text)
     sources: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

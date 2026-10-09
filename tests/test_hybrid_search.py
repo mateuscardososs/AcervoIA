@@ -13,6 +13,8 @@ from acervo_ia.services.retrieval_evaluation import (
 from acervo_ia.services.semantic_search import (
     SearchHit,
     build_full_text_statement,
+    build_literal_statement,
+    build_search_statement,
     extract_literal_terms,
     fuse_rankings,
     normalize_literal,
@@ -60,6 +62,34 @@ def test_full_text_query_is_scoped_to_collection_and_uses_simple_configuration()
     assert "websearch_to_tsquery('simple'," in sql
     assert "documents.collection_id" in sql
     assert "LIMIT" in sql
+
+
+def test_all_retrieval_rankings_apply_the_selected_document_ids() -> None:
+    selected = [UUID(int=41), UUID(int=42)]
+    statements = [
+        build_search_statement(
+            collection_id=UUID(int=10),
+            embedding=[0.0] * 768,
+            embedding_model="embeddinggemma",
+            limit=5,
+            document_ids=selected,
+        ),
+        build_full_text_statement(
+            collection_id=UUID(int=10),
+            query="calibração",
+            limit=5,
+            document_ids=selected,
+        ),
+        build_literal_statement(
+            collection_id=UUID(int=10),
+            document_ids=selected,
+        ),
+    ]
+
+    for statement in statements:
+        compiled = statement.compile(dialect=postgresql.dialect())
+        assert "documents.id IN" in str(compiled)
+        assert any(value == selected for value in compiled.params.values())
 
 
 def test_retrieval_metrics_count_query_level_hits_and_first_relevant_rank() -> None:

@@ -185,6 +185,16 @@ input::placeholder, textarea::placeholder { color: #9aabad; }
 .question-panel > label { display: block; margin-bottom: 9px; }
 .question-panel textarea { min-height: 112px; font-size: 14px; }
 .question-controls { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-top: 15px; }
+.document-filter { min-width: 0; margin: 18px 0 0; padding: 13px 14px; border: 1px solid var(--line); border-radius: 6px; }
+.document-filter legend { padding: 0 5px; color: #385760; font-size: 11px; font-weight: 600; }
+.document-filter-heading { display: flex; justify-content: flex-end; }
+.document-filter-clear { min-height: 30px; padding: 5px 9px; font-size: 10px; }
+.document-filter-help, .document-filter-empty { margin: 0 0 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.document-filter-list { display: grid; max-height: 190px; gap: 5px; overflow-y: auto; }
+.document-filter-option { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 7px 8px; border-radius: 4px; color: #385760; cursor: pointer; font-size: 11px; }
+.document-filter-option:hover { background: #eef5f4; }
+.document-filter-option input { flex: 0 0 auto; accent-color: var(--teal); }
+.document-filter-option span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .strategy-control { display: grid; gap: 7px; width: min(230px, 100%); }
 .strategy-control select { min-height: 39px; color: #294a53; font-size: 12px; }
 .ask-button { min-width: 132px; }
@@ -222,6 +232,7 @@ input::placeholder, textarea::placeholder { color: #9aabad; }
 .history-card-meta { display: flex; justify-content: space-between; gap: 14px; color: #71898e; font: 400 9px var(--mono); }
 .history-card h3 { margin: 12px 0 8px; color: #294a53; font-size: 14px; line-height: 1.5; }
 .history-answer { margin: 0; color: #4f6b71; font-size: 12px; line-height: 1.75; white-space: pre-wrap; }
+.history-filter-scope { margin: 8px 0 0; color: #71898e; font-size: 10px; }
 .history-source-list { margin-top: 14px; }
 .history-repeat-button, .history-more-button { margin-top: 14px; }
 .history-more-button { display: block; margin-inline: auto; }

@@ -188,6 +188,7 @@ def answer_question(
     question: str,
     limit: int,
     strategy: Literal["vector", "text", "hybrid"],
+    document_ids: Sequence[UUID] | None = None,
 ) -> AnswerResult:
     """Run retrieval, chat, and strict source validation without HTTP coupling."""
     if strategy == "text":
@@ -196,6 +197,7 @@ def answer_question(
             collection_id=collection_id,
             query=question,
             limit=limit,
+            document_ids=document_ids,
         )
     else:
         query_vector = _query_vector(question)
@@ -206,6 +208,7 @@ def answer_question(
                 embedding=query_vector,
                 embedding_model=config.OLLAMA_EMBEDDING_MODEL,
                 limit=limit,
+                document_ids=document_ids,
             )
         else:
             hits = search_hybrid_chunks(
@@ -215,7 +218,12 @@ def answer_question(
                 embedding=query_vector,
                 embedding_model=config.OLLAMA_EMBEDDING_MODEL,
                 limit=limit,
+                document_ids=document_ids,
             )
+
+    if document_ids:
+        allowed_document_ids = set(document_ids)
+        hits = [hit for hit in hits if hit.document_id in allowed_document_ids]
 
     if not hits:
         return AnswerResult(NO_EVIDENCE_ANSWER, (), ())

@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from acervo_ia.db.connection import get_db
-from acervo_ia.db.models import Base, Collection, QuestionHistory, User
+from acervo_ia.db.models import Base, Collection, Document, QuestionHistory, User
 from acervo_ia.main import app
 from acervo_ia.security import create_access_token
 from acervo_ia.services import chat as chat_service
@@ -75,10 +75,11 @@ def create_collection(
 def search_hit(
     *,
     content: str = "Calibre o equipamento conforme a seção 4.",
+    document_id: UUID = UUID(int=12),
 ) -> SearchHit:
     return SearchHit(
         chunk_id=UUID(int=11),
-        document_id=UUID(int=12),
+        document_id=document_id,
         document_name="manual.txt",
         page_number=None,
         position=0,
@@ -155,6 +156,20 @@ def mock_retrieval(
     return calls
 
 
+def create_qa_document(collection_id: UUID, filename: str) -> UUID:
+    with app.state.test_session_factory() as session:
+        document = Document(
+            collection_id=collection_id,
+            original_filename=filename,
+            storage_key=uuid4().hex,
+            content_type="text/plain",
+            size_bytes=100,
+        )
+        session.add(document)
+        session.commit()
+        return document.id
+
+
 @pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
 def test_answers_with_backend_validated_source_metadata(
     qa_client: TestClient,
@@ -181,6 +196,8 @@ def test_answers_with_backend_validated_source_metadata(
     )
 
     assert response.status_code == 200
+    retrieval_call = next(call for call in retrieval_calls if "strategy" in call)
+    assert retrieval_call.get("document_ids") is None
     assert response.json() == {
         "answer": "A calibração está na seção 4. [S1]",
         "sources": [
@@ -199,6 +216,7 @@ def test_answers_with_backend_validated_source_metadata(
             "collection_id": collection_id,
             "query": "Como calibro o equipamento?",
             "limit": 5,
+            "document_ids": None,
         }]
     else:
         assert retrieval_calls[0]["texts"] == ["Como calibro o equipamento?"]
@@ -536,6 +554,101 @@ def test_successful_answer_is_saved_and_returned_by_owned_collection_history(
     assert item["answer"] == "Use o botão azul. [S1]"
     assert item["sources"] == ask.json()["sources"]
     assert item["created_at"]
+
+
+@pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
+def test_filtered_answer_uses_multiple_documents_and_persists_filter_in_history(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    _, collection_id, token = create_collection("filtered-owner@example.test")
+    first_document = create_qa_document(collection_id, "a-manual.txt")
+    second_document = create_qa_document(collection_id, "b-manual.txt")
+    excluded_document = create_qa_document(collection_id, "c-manual.txt")
+    selected = [first_document, second_document]
+    retrieval_calls = mock_retrieval(
+        monkeypatch,
+        [
+            search_hit(document_id=first_document),
+            search_hit(document_id=second_document, content="Segundo trecho."),
+            search_hit(document_id=excluded_document, content="Trecho fora do filtro."),
+        ],
+    )
+    chat_requests = mock_chat(
+        monkeypatch,
+        content=json.dumps({"answer": "A evidência está no primeiro manual. [S1]", "citations": ["S1"]}),
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={
+            "question": "O que dizem os manuais selecionados?",
+            "strategy": strategy,
+            "document_ids": [str(item) for item in selected],
+        },
+        headers=headers,
+    )
+    history = qa_client.get(f"/collections/{collection_id}/history", headers=headers)
+
+    retrieval_call = next(call for call in retrieval_calls if "strategy" in call)
+    assert response.status_code == 200
+    assert response.json()["sources"][0]["document_id"] == str(first_document)
+    assert retrieval_call["document_ids"] == selected
+    assert "Trecho fora do filtro." not in chat_requests[0]["messages"][1]["content"]
+    assert history.status_code == 200
+    assert history.json()["items"][0]["document_ids"] == [str(item) for item in selected]
+
+
+@pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
+@pytest.mark.parametrize("invalid_scope", ["other_collection", "other_user"])
+def test_ask_rejects_selected_document_outside_collection_before_model_calls(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+    invalid_scope: str,
+) -> None:
+    owner_id, collection_id, token = create_collection("filtered-owner@example.test")
+    if invalid_scope == "other_collection":
+        with app.state.test_session_factory() as session:
+            other_collection = Collection(owner_id=owner_id, name="Outra coleção")
+            session.add(other_collection)
+            session.flush()
+            outside = Document(
+                collection_id=other_collection.id,
+                original_filename="outside.txt",
+                storage_key="z" * 32,
+                content_type="text/plain",
+                size_bytes=10,
+            )
+            session.add(outside)
+            session.commit()
+            outside_id = outside.id
+    else:
+        _, other_collection, _ = create_collection("another-user@example.test")
+        outside_id = create_qa_document(other_collection, "private.txt")
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("O filtro inválido chegou à busca ou ao modelo")
+
+    monkeypatch.setattr(answering_service, "generate_embeddings", forbidden)
+    monkeypatch.setattr(answering_service, "generate_chat_completion", forbidden)
+    for name in ("search_chunks", "search_text_chunks", "search_hybrid_chunks"):
+        monkeypatch.setattr(answering_service, name, forbidden)
+
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={
+            "question": "Pergunta filtrada",
+            "strategy": strategy,
+            "document_ids": [str(outside_id)],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+    assert "outside.txt" not in response.text
 
 
 def test_successful_abstention_is_saved_but_failed_answers_are_not(

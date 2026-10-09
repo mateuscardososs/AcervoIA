@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -71,7 +71,7 @@ def create_owned_document(email: str = "owner@example.test") -> tuple[
         document = Document(
             collection_id=collection.id,
             original_filename="manual.txt",
-            storage_key="a" * 32,
+            storage_key=uuid4().hex,
             content_type="text/plain",
             size_bytes=100,
             processing_status="completed",
@@ -441,6 +441,7 @@ def test_search_strategy_dispatch_and_text_does_not_call_ollama(
 ) -> None:
     _, collection_id, _, token = create_owned_document()
     calls: list[str] = []
+    search_kwargs: dict[str, Any] = {}
     monkeypatch.setattr(
         embedding_routes,
         "_generate",
@@ -450,7 +451,9 @@ def test_search_strategy_dispatch_and_text_does_not_call_ollama(
         monkeypatch.setattr(
             embedding_routes,
             name,
-            lambda *args, _name=name, **kwargs: calls.append(_name) or [],
+            lambda *args, _name=name, **kwargs: (
+                calls.append(_name) or search_kwargs.update(kwargs) or []
+            ),
         )
 
     response = embeddings_client.post(
@@ -462,6 +465,7 @@ def test_search_strategy_dispatch_and_text_does_not_call_ollama(
     assert response.status_code == 200
     assert calls[-1] == expected_search
     assert ("embedding" in calls) is (strategy != "text")
+    assert search_kwargs["document_ids"] is None
 
 
 def test_search_defaults_to_hybrid(
@@ -485,6 +489,118 @@ def test_search_defaults_to_hybrid(
 
     assert response.status_code == 200
     assert calls == ["hybrid"]
+
+
+@pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
+def test_search_filters_multiple_documents_for_every_strategy(
+    embeddings_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    _, collection_id, first_document_id, token = create_owned_document()
+    with app.state.test_session_factory() as session:
+        second_document = Document(
+            collection_id=collection_id,
+            original_filename="manual-segundo.txt",
+            storage_key="b" * 32,
+            content_type="text/plain",
+            size_bytes=80,
+            processing_status="completed",
+        )
+        excluded_document = Document(
+            collection_id=collection_id,
+            original_filename="manual-excluido.txt",
+            storage_key="c" * 32,
+            content_type="text/plain",
+            size_bytes=80,
+            processing_status="completed",
+        )
+        session.add_all([second_document, excluded_document])
+        session.commit()
+        second_document_id = second_document.id
+    selected_ids = [first_document_id, second_document_id]
+    seen: list[UUID | None] = []
+    monkeypatch.setattr(embedding_routes, "_generate", lambda _: [[0.0] * 768])
+
+    def search(*_args: Any, **kwargs: Any) -> list[semantic_search.SearchHit]:
+        seen.extend(kwargs.get("document_ids") or [])
+        return [
+            semantic_search.SearchHit(
+                chunk_id=UUID(int=index),
+                document_id=document_id,
+                document_name=f"manual-{index}.txt",
+                page_number=None,
+                position=index,
+                content="Trecho filtrado",
+                score=0.9,
+            )
+            for index, document_id in enumerate(selected_ids, start=1)
+        ]
+
+    for name in ("search_text_chunks", "search_chunks", "search_hybrid_chunks"):
+        monkeypatch.setattr(embedding_routes, name, search)
+
+    response = embeddings_client.post(
+        f"/collections/{collection_id}/search",
+        json={
+            "query": "calibração",
+            "strategy": strategy,
+            "document_ids": [str(item) for item in selected_ids],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert set(seen) == set(selected_ids)
+    assert {UUID(result["document_id"]) for result in response.json()["results"]} == set(selected_ids)
+
+
+@pytest.mark.parametrize("invalid_scope", ["other_collection", "other_user"])
+@pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
+def test_search_rejects_documents_outside_owned_collection_before_retrieval(
+    embeddings_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_scope: str,
+    strategy: str,
+) -> None:
+    owner_id, collection_id, _, token = create_owned_document("owner@example.test")
+    if invalid_scope == "other_collection":
+        with app.state.test_session_factory() as session:
+            another_collection = Collection(owner_id=owner_id, name="Outra coleção")
+            session.add(another_collection)
+            session.flush()
+            outside_document = Document(
+                collection_id=another_collection.id,
+                original_filename="outside.txt",
+                storage_key="d" * 32,
+                content_type="text/plain",
+                size_bytes=20,
+            )
+            session.add(outside_document)
+            session.commit()
+            outside_id = outside_document.id
+    else:
+        _, _, outside_id, _ = create_owned_document("another-user@example.test")
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("O filtro inválido alcançou a recuperação")
+
+    monkeypatch.setattr(embedding_routes, "_generate", forbidden)
+    for name in ("search_text_chunks", "search_chunks", "search_hybrid_chunks"):
+        monkeypatch.setattr(embedding_routes, name, forbidden)
+
+    response = embeddings_client.post(
+        f"/collections/{collection_id}/search",
+        json={
+            "query": "privado",
+            "strategy": strategy,
+            "document_ids": [str(outside_id)],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+    assert "outside.txt" not in response.text
 
 
 @pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
