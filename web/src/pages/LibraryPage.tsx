@@ -2,8 +2,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError, type Collection } from "../api/client";
 import { LoadingState } from "../components/LoadingState";
+import { useAuth } from "../auth/AuthProvider";
 
 export function LibraryPage() {
+  const { user } = useAuth();
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,9 +92,9 @@ export function LibraryPage() {
           <h1>Meu acervo</h1>
           <p className="page-subtitle">Manuais organizados para encontrar e conferir.</p>
         </div>
-        <button className="button button-primary" onClick={() => setShowCreate(true)} type="button">
+        {!user?.is_demo && <button className="button button-primary" onClick={() => setShowCreate(true)} type="button">
           <span aria-hidden="true">＋</span> Nova coleção
-        </button>
+        </button>}
       </header>
 
       {error && <p className="notice notice-error" role="alert">{error}</p>}
@@ -103,10 +105,10 @@ export function LibraryPage() {
           <div className="empty-mark" aria-hidden="true">▤</div>
           <p className="eyebrow">PRIMEIRA PRATELEIRA</p>
           <h2>Seu acervo ainda está vazio</h2>
-          <p>Crie uma coleção para começar a reunir seus manuais e documentos.</p>
-          <button className="button button-primary" onClick={() => setShowCreate(true)} type="button">
+          <p>{user?.is_demo ? "Os documentos fictícios da demonstração ainda não foram preparados." : "Crie uma coleção para começar a reunir seus manuais e documentos."}</p>
+          {!user?.is_demo && <button className="button button-primary" onClick={() => setShowCreate(true)} type="button">
             Criar primeira coleção
-          </button>
+          </button>}
         </section>
       ) : (
         <section aria-label="Suas coleções" className="collection-grid">
@@ -115,7 +117,7 @@ export function LibraryPage() {
               <div className="collection-card-top">
                 <span className="collection-symbol" aria-hidden="true">▤</span>
                 <span className="mono-label">COLEÇÃO</span>
-                <div className="collection-actions">
+                {!user?.is_demo && <div className="collection-actions">
                   <button
                     aria-label={`Renomear ${collection.name}`}
                     className="icon-button"
@@ -128,7 +130,7 @@ export function LibraryPage() {
                     onClick={() => setDeleting(collection)}
                     type="button"
                   >×</button>
-                </div>
+                </div>}
               </div>
               {editing === collection.id ? (
                 <form className="stack-form collection-edit-form" onSubmit={(event) => void rename(event, collection)}>
@@ -155,7 +157,7 @@ export function LibraryPage() {
         </section>
       )}
 
-      {showCreate && (
+      {!user?.is_demo && showCreate && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget) setShowCreate(false);
         }}>
@@ -176,7 +178,7 @@ export function LibraryPage() {
         </div>
       )}
 
-      {deleting && (
+      {!user?.is_demo && deleting && (
         <div className="dialog-backdrop">
           <section aria-labelledby="delete-collection-title" aria-modal="true" className="dialog dialog-small" role="dialog">
             <p className="eyebrow">CONFIRMAR AÇÃO</p>

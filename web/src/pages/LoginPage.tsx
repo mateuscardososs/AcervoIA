@@ -4,11 +4,12 @@ import { ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
 
 export function LoginPage() {
-  const { signIn, signingIn } = useAuth();
+  const { signIn, enterDemo, signingIn } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [demoStarting, setDemoStarting] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -22,6 +23,23 @@ export function LoginPage() {
           ? "E-mail ou senha incorretos."
           : "Não foi possível entrar. Verifique a conexão com o AcervoIA e tente novamente.",
       );
+    }
+  }
+
+  async function enterPublicDemo() {
+    setError(null);
+    setDemoStarting(true);
+    try {
+      await enterDemo();
+      navigate("/library", { replace: true });
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError && cause.status === 429
+          ? "A demonstração atingiu o limite temporário de acessos. Tente mais tarde."
+          : "A demonstração está indisponível no momento.",
+      );
+    } finally {
+      setDemoStarting(false);
     }
   }
 
@@ -82,6 +100,19 @@ export function LoginPage() {
               <span aria-hidden="true">→</span>
             </button>
           </form>
+          <div className="demo-login-divider"><span>ou</span></div>
+          <button
+            className="button button-secondary demo-login-button"
+            type="button"
+            disabled={signingIn || demoStarting}
+            onClick={() => void enterPublicDemo()}
+          >
+            {demoStarting ? "Preparando demonstração…" : "Entrar na demonstração"}
+            <span aria-hidden="true">↗</span>
+          </button>
+          <p className="demo-safety-note">
+            A demonstração usa manuais fictícios; perguntas e trechos podem ser enviados ao Gemini. Não envie informações pessoais ou confidenciais.
+          </p>
           <p className="login-private-note"><span aria-hidden="true">⌑</span> Não há cadastro público. Peça acesso ao administrador do acervo.</p>
         </div>
       </section>

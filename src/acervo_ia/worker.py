@@ -7,18 +7,32 @@ written to logs; only opaque task identifiers and lifecycle metadata are logged.
 import logging
 import os
 import time
+from tempfile import TemporaryDirectory
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 from uuid import UUID
 
 from sqlalchemy import delete, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session, sessionmaker
 
 from acervo_ia import config
 from acervo_ia.db.connection import get_engine
-from acervo_ia.db.models import Collection, Document, DocumentChunk, DocumentTask, User
+from acervo_ia.db.models import (
+    Collection,
+    Document,
+    DocumentChunk,
+    DocumentTask,
+    RuntimeSetting,
+    User,
+)
+from acervo_ia.services.document_tasks import (
+    ActiveDocumentTaskError,
+    DocumentTaskQueueError,
+    enqueue_document_task,
+)
 from acervo_ia.services.document_processing import (
     DocumentExtractionError,
     chunk_pages,
@@ -29,6 +43,8 @@ from acervo_ia.services.embeddings import (
     EmbeddingServiceError,
     generate_embeddings,
 )
+from acervo_ia.services import storage
+from acervo_ia.services.usage_limits import reserve_gemini_call
 
 logger = logging.getLogger("acervo_ia.worker")
 MAX_ATTEMPTS = 3
@@ -51,7 +67,7 @@ def _factory() -> sessionmaker[Session]:
 def _safe_storage_path(storage_key: str) -> Path:
     if len(storage_key) != 32 or any(c not in "0123456789abcdef" for c in storage_key):
         raise DocumentExtractionError
-    return config.DOCUMENT_STORAGE_DIRECTORY / storage_key
+    return storage.local_path(storage_key)
 
 
 def _set_progress(
@@ -150,10 +166,21 @@ def _process_document(
         if owned is None:
             raise TaskOwnershipError
         task, document = owned
-        path = _safe_storage_path(document.storage_key)
+        storage_key = document.storage_key
         content_type = document.content_type
-
-    pages = extract_document_pages(path, content_type)
+    if config.STORAGE_BACKEND == "s3":
+        try:
+            source = storage.open_file(storage_key)
+            with TemporaryDirectory(prefix="acervoia-worker-") as temporary_directory:
+                path = Path(temporary_directory) / storage_key
+                path.write_bytes(source.read())
+                source.close()
+                pages = extract_document_pages(path, content_type)
+        except storage.StorageUnavailable:
+            raise DocumentExtractionError from None
+    else:
+        path = _safe_storage_path(storage_key)
+        pages = extract_document_pages(path, content_type)
     chunks = chunk_pages(pages)
     if not chunks:
         raise DocumentExtractionError
@@ -182,12 +209,15 @@ def _process_document(
     return len(chunks)
 
 
-def _embed_document(factory: sessionmaker[Session], task_id: UUID) -> tuple[int, str]:
+def _embed_document(factory: sessionmaker[Session], task_id: UUID) -> tuple[int, str, str]:
     with factory() as session:
         owned = _load_owned_document(session, task_id)
         if owned is None:
             raise TaskOwnershipError
         _task, document = owned
+        owner = session.get(User, _task.owner_id)
+        if owner is None:
+            raise TaskOwnershipError
         if document.processing_status != "completed":
             raise DocumentExtractionError
         chunks = session.scalars(
@@ -201,7 +231,30 @@ def _embed_document(factory: sessionmaker[Session], task_id: UUID) -> tuple[int,
         contents = [chunk.content for chunk in chunks]
 
     _set_progress(factory, task_id, 15)
-    vectors = generate_embeddings(contents, model=config.OLLAMA_EMBEDDING_MODEL)
+    provider = (
+        config.DEMO_EMBEDDING_PROVIDER
+        if owner.is_demo
+        else config.EMBEDDING_PROVIDER
+    )
+    model = (
+        config.GEMINI_EMBEDDING_MODEL
+        if provider == "gemini"
+        else config.OLLAMA_EMBEDDING_MODEL
+    )
+    def before_call() -> None:
+        if provider == "gemini":
+            with factory() as call_session:
+                reserve_gemini_call(call_session)
+
+    if provider == "gemini":
+        vectors = generate_embeddings(
+            contents,
+            model=model,
+            provider=provider,
+            before_call=before_call,
+        )
+    else:
+        vectors = generate_embeddings(contents, model=model)
     if len(vectors) != len(chunk_ids):
         raise EmbeddingServiceError
     _set_progress(factory, task_id, 75)
@@ -221,11 +274,13 @@ def _embed_document(factory: sessionmaker[Session], task_id: UUID) -> tuple[int,
         for chunk_id, vector in zip(chunk_ids, vectors, strict=True):
             chunk = chunks_by_id[chunk_id]
             chunk.embedding = vector
-            chunk.embedding_model = config.OLLAMA_EMBEDDING_MODEL
+            chunk.embedding_model = model
+            chunk.embedding_provider = provider
         task.result_count = len(chunk_ids)
-        task.embedding_model = config.OLLAMA_EMBEDDING_MODEL
+        task.embedding_model = model
+        task.embedding_provider = provider
         session.commit()
-    return len(chunk_ids), config.OLLAMA_EMBEDDING_MODEL
+    return len(chunk_ids), model, provider
 
 
 def _finish(
@@ -234,6 +289,7 @@ def _finish(
     *,
     count: int | None = None,
     model: str | None = None,
+    provider: str | None = None,
 ) -> None:
     with factory() as session:
         task = session.get(DocumentTask, task_id)
@@ -244,9 +300,44 @@ def _finish(
         task.error = None
         task.result_count = count if count is not None else task.result_count
         task.embedding_model = model if model is not None else task.embedding_model
+        task.embedding_provider = provider if provider is not None else task.embedding_provider
         task.lease_expires_at = None
         task.updated_at = _now()
         session.commit()
+
+
+def _queue_public_demo_embeddings(
+    factory: sessionmaker[Session], task_id: UUID
+) -> None:
+    try:
+        with factory() as session:
+            owned = _load_owned_document(session, task_id)
+            if owned is None:
+                return
+            process_task, document = owned
+            owner = session.get(User, process_task.owner_id)
+            collection = session.get(Collection, process_task.collection_id)
+            if owner is None or collection is None or not owner.is_demo:
+                return
+            if config.DEMO_EMBEDDING_PROVIDER == "gemini":
+                enabled = session.scalar(
+                    select(RuntimeSetting.value).where(
+                        RuntimeSetting.key == "gemini_enabled"
+                    )
+                )
+                if not config.GEMINI_ENABLED or enabled != "true":
+                    return
+            elif config.DEMO_EMBEDDING_PROVIDER != "ollama":
+                return
+            enqueue_document_task(
+                session,
+                document=document,
+                collection=collection,
+                user=owner,
+                task_type="embeddings",
+            )
+    except (ActiveDocumentTaskError, DocumentTaskQueueError, SQLAlchemyError):
+        logger.warning("demo indexing task enqueue failed")
 
 
 def _fail(
@@ -299,9 +390,16 @@ def run_task(
         if task_type == "process":
             count = _process_document(factory, parsed_id)
             _finish(factory, parsed_id, count=count)
+            _queue_public_demo_embeddings(factory, parsed_id)
         elif task_type == "embeddings":
-            count, model = _embed_document(factory, parsed_id)
-            _finish(factory, parsed_id, count=count, model=model)
+            count, model, provider = _embed_document(factory, parsed_id)
+            _finish(
+                factory,
+                parsed_id,
+                count=count,
+                model=model,
+                provider=provider,
+            )
         else:
             _fail(factory, parsed_id, retryable=False)
             return True

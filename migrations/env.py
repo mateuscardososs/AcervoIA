@@ -14,7 +14,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 project_root = Path(__file__).resolve().parents[1]
-load_dotenv(project_root / ".env")
+if not os.getenv("DATABASE_URL"):
+    load_dotenv(project_root / ".env")
 
 database_url = os.getenv("DATABASE_URL")
 if not database_url:

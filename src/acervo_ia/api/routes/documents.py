@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
 from acervo_ia.api.document_task_schemas import DocumentTaskResponse
+from acervo_ia.api.demo_access import ensure_writable_user
 from acervo_ia.config import (
     DOCUMENT_FORMATS,
     DOCUMENT_STORAGE_DIRECTORY,
@@ -38,6 +39,7 @@ from acervo_ia.services.document_tasks import (
     DocumentTaskQueueError,
     enqueue_document_task,
 )
+from acervo_ia.services import storage
 
 router = APIRouter(prefix="/collections", tags=["documents"])
 
@@ -111,7 +113,16 @@ def _safe_storage_path(storage_key: str) -> Path:
     return DOCUMENT_STORAGE_DIRECTORY / storage_key
 
 
-def _store_content(storage_key: str, content: bytes) -> Path:
+def _store_content(storage_key: str, content: bytes) -> Path | None:
+    if storage.config.STORAGE_BACKEND == "s3":
+        try:
+            storage.store(storage_key, content)
+        except storage.StorageUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Não foi possível armazenar o arquivo.",
+            ) from None
+        return None
     path = _safe_storage_path(storage_key)
     created = False
     try:
@@ -234,7 +245,13 @@ def _find_existing_document(
     )
 
 
-def _discard_stored_file(path: Path) -> None:
+def _discard_stored_file(storage_key: str, path: Path | None) -> None:
+    if path is None:
+        try:
+            storage.delete(storage_key)
+        except storage.StorageUnavailable:
+            pass
+        return
     try:
         path.unlink(missing_ok=True)
     except OSError:
@@ -267,6 +284,7 @@ def upload_document(
     file: Annotated[UploadFile, File()],
     response: Response,
 ) -> DocumentResponse:
+    ensure_writable_user(user)
     collection = _get_owned_collection(collection_id, user, session)
     filename = file.filename
     if not filename:
@@ -330,7 +348,7 @@ def upload_document(
             session.rollback()
         except SQLAlchemyError:
             pass
-        _discard_stored_file(stored_path)
+        _discard_stored_file(storage_key, stored_path)
         try:
             duplicate = _find_document_by_content_hash(
                 session,
@@ -353,7 +371,7 @@ def upload_document(
             session.rollback()
         except SQLAlchemyError:
             pass
-        _discard_stored_file(stored_path)
+        _discard_stored_file(storage_key, stored_path)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Não foi possível concluir o upload do arquivo.",
@@ -390,6 +408,7 @@ def delete_document(
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
+    ensure_writable_user(user)
     collection = _get_owned_collection(collection_id, user, session)
     document = session.scalar(
         select(Document).where(
@@ -403,12 +422,19 @@ def delete_document(
             detail="Documento não encontrado.",
         )
 
-    stored_path = _safe_storage_path(document.storage_key)
+    stored_path = (
+        None
+        if storage.config.STORAGE_BACKEND == "s3"
+        else _safe_storage_path(document.storage_key)
+    )
     session.delete(document)
     session.commit()
     try:
-        stored_path.unlink(missing_ok=True)
-    except OSError:
+        if stored_path is None:
+            storage.delete(document.storage_key)
+        else:
+            stored_path.unlink(missing_ok=True)
+    except (OSError, storage.StorageUnavailable):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Não foi possível remover o arquivo armazenado.",
@@ -449,24 +475,38 @@ def open_original_document(
             detail="Documento não encontrado.",
         )
 
-    stored_path = _safe_storage_path(document.storage_key)
-    try:
-        descriptor = os.open(
-            stored_path,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
-        open_file = os.fdopen(descriptor, "rb")
-        file_info = os.fstat(open_file.fileno())
-        if not stat.S_ISREG(file_info.st_mode):
-            open_file.close()
-            raise FileNotFoundError
-    except OSError:
-        if "open_file" in locals() and not open_file.closed:
-            open_file.close()
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="O arquivo original deste documento não está disponível.",
-        ) from None
+    if storage.config.STORAGE_BACKEND == "s3":
+        try:
+            open_file = storage.open_file(document.storage_key)
+            open_file.seek(0, os.SEEK_END)
+            file_size = open_file.tell()
+            open_file.seek(0)
+        except (storage.StorageUnavailable, OSError):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="O arquivo original deste documento não está disponível.",
+            ) from None
+        file_info_size = file_size
+    else:
+        stored_path = _safe_storage_path(document.storage_key)
+        try:
+            descriptor = os.open(
+                stored_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            open_file = os.fdopen(descriptor, "rb")
+            file_info = os.fstat(open_file.fileno())
+            if not stat.S_ISREG(file_info.st_mode):
+                open_file.close()
+                raise FileNotFoundError
+        except OSError:
+            if "open_file" in locals() and not open_file.closed:
+                open_file.close()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="O arquivo original deste documento não está disponível.",
+            ) from None
+        file_info_size = file_info.st_size
 
     filename = document.original_filename.replace("\\", "/").rsplit("/", 1)[-1]
     filename = "".join(
@@ -484,7 +524,7 @@ def open_original_document(
         "Content-Disposition": (
             f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}"
         ),
-        "Content-Length": str(file_info.st_size),
+        "Content-Length": str(file_info_size),
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
     }
@@ -506,6 +546,7 @@ def process_document(
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> DocumentTaskResponse:
+    ensure_writable_user(user)
     collection = _get_owned_collection(collection_id, user, session)
     document = session.scalar(
         select(Document).where(

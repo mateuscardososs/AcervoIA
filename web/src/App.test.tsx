@@ -6,7 +6,7 @@ import AppRoutes from "./App";
 import { AuthProvider } from "./auth/AuthProvider";
 import { TOKEN_KEY } from "./api/client";
 
-const user = { id: "u-1", email: "tecnica@example.test" };
+const user = { id: "u-1", email: "tecnica@example.test", is_demo: false };
 const collection = {
   id: "c-1",
   name: "Manuais de demonstração",
@@ -64,6 +64,28 @@ afterEach(() => {
 });
 
 describe("AcervoIA web flows", () => {
+  it("enters the read-only public demo without a password and identifies fictitious data", async () => {
+    const demoUser = { id: "demo-1", email: "public-demo@example.invalid", is_demo: true };
+    installFetch((path, init) => {
+      if (path === "/auth/demo-session") {
+        expect(init.method).toBe("POST");
+        return jsonResponse({ access_token: "short-demo-jwt", token_type: "bearer" });
+      }
+      if (path === "/auth/me") return jsonResponse(demoUser);
+      if (path === "/collections") return jsonResponse([collection]);
+      return jsonResponse({ detail: "not found" }, 404);
+    });
+    const actor = userEvent.setup();
+    mount("/login");
+
+    await actor.click(screen.getByRole("button", { name: "Entrar na demonstração" }));
+
+    expect(await screen.findByText(/Demonstração · dados fictícios · somente leitura/)).toBeVisible();
+    expect(screen.getByRole("heading", { name: collection.name })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Nova coleção/ })).toBeNull();
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe("short-demo-jwt");
+  });
+
   it("logs in and guides an empty account to create its first collection", async () => {
     const fetchMock = installFetch((path, init) => {
       if (path === "/auth/token") {

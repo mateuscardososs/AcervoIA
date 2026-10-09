@@ -1,8 +1,10 @@
 from typing import Any
+from collections.abc import Callable
 
 import httpx
 
 from acervo_ia import config
+from acervo_ia.services import gemini
 
 
 class ChatModelError(RuntimeError):
@@ -16,7 +18,25 @@ def _new_client() -> httpx.Client:
     )
 
 
-def generate_chat_completion(messages: list[dict[str, str]]) -> str:
+def generate_chat_completion(
+    messages: list[dict[str, str]],
+    *,
+    provider: str | None = None,
+    before_call: Callable[[], None] | None = None,
+) -> str:
+    selected_provider = provider or config.CHAT_PROVIDER
+    if selected_provider == "gemini":
+        try:
+            return gemini.complete(
+                messages,
+                config.GEMINI_CHAT_MODEL,
+                max_output_tokens=config.DEMO_MAX_OUTPUT_TOKENS,
+                before_call=before_call,
+            )
+        except gemini.GeminiUnavailable:
+            raise ChatModelError("O provedor de respostas está indisponível.") from None
+    if selected_provider != "ollama":
+        raise ChatModelError("O provedor de respostas não está configurado.")
     try:
         with _new_client() as client:
             response = client.post(
@@ -26,6 +46,7 @@ def generate_chat_completion(messages: list[dict[str, str]]) -> str:
                     "messages": messages,
                     "format": "json",
                     "stream": False,
+                    "options": {"num_predict": config.DEMO_MAX_OUTPUT_TOKENS},
                 },
             )
             response.raise_for_status()

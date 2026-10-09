@@ -269,6 +269,11 @@ input::placeholder, textarea::placeholder { color: #9aabad; }
 .login-submit { width: 100%; justify-content: space-between; min-height: 46px; margin-top: 8px; padding: 0 16px; }
 .login-private-note { display: flex; align-items: flex-start; gap: 8px; margin: 19px 0 0; color: #899a9d; font-size: 10px; line-height: 1.7; }
 .login-private-note span { color: var(--teal); font-size: 16px; }
+.demo-login-divider { display: flex; align-items: center; gap: 12px; margin: 20px 0 14px; color: #899a9d; font: 11px var(--mono); }
+.demo-login-divider::before, .demo-login-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.demo-login-button { width: 100%; justify-content: space-between; }
+.demo-safety-note { margin: 12px 0 0; color: #687b7e; font-size: 11px; line-height: 1.6; }
+.demo-session-banner { padding: 10px 20px; background: #fff4d8; border-bottom: 1px solid #f0d694; color: #59430e; font-size: 12px; font-weight: 600; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { opacity: .48; } }

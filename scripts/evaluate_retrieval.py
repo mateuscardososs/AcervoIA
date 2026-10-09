@@ -1,4 +1,4 @@
-"""Run the local retrieval benchmark against PostgreSQL and Ollama.
+"""Run the local retrieval benchmark against PostgreSQL and the configured embedder.
 
 All database rows created by this command live in one transaction that is
 always rolled back, including when retrieval or metric calculation fails.
@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+from fastapi import HTTPException
 from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -35,10 +36,25 @@ def evaluate() -> dict[str, object]:
     )
 
     sections, questions = load_corpus()
-    model = config.OLLAMA_EMBEDDING_MODEL
+    provider = config.EMBEDDING_PROVIDER
+    model = config.GEMINI_EMBEDDING_MODEL if provider == "gemini" else config.OLLAMA_EMBEDDING_MODEL
     texts = [section["content"] for section in sections]
     texts.extend(question["question"] for question in questions)
-    vectors = generate_embeddings(texts, model=model)
+
+    def reserve_gemini_request() -> None:
+        if provider != "gemini":
+            return
+        from acervo_ia.services.usage_limits import reserve_gemini_call
+
+        with Session(get_engine()) as quota_session:
+            reserve_gemini_call(quota_session)
+
+    vectors = generate_embeddings(
+        texts,
+        model=model,
+        provider=provider,
+        before_call=reserve_gemini_request if provider == "gemini" else None,
+    )
     section_vectors = vectors[: len(sections)]
     question_vectors = vectors[len(sections) :]
 
@@ -85,6 +101,7 @@ def evaluate() -> dict[str, object]:
                 content=section["content"],
                 embedding=vector,
                 embedding_model=model,
+                embedding_provider=provider,
             )
             positions[equipment] += 1
             session.add(chunk)
@@ -104,6 +121,7 @@ def evaluate() -> dict[str, object]:
                     collection_id=collection_id,
                     embedding=query_vector,
                     embedding_model=model,
+                    embedding_provider=provider,
                     limit=5,
                 ),
                 "text": search_text_chunks(
@@ -118,6 +136,7 @@ def evaluate() -> dict[str, object]:
                     query=question["question"],
                     embedding=query_vector,
                     embedding_model=model,
+                    embedding_provider=provider,
                     limit=5,
                 ),
             }
@@ -130,6 +149,7 @@ def evaluate() -> dict[str, object]:
 
         result = {
             "embedding_model": model,
+            "embedding_provider": provider,
             "questions": len(questions),
             "answerable": 25,
             "unanswerable": 5,
@@ -156,13 +176,14 @@ def main() -> int:
         DatabaseUnavailableError,
         SQLAlchemyError,
         EmbeddingServiceError,
+        HTTPException,
         OSError,
         ValueError,
     ):
         # In particular, do not print driver errors or tracebacks that can include
         # the database URL or other local connection details.
         print(
-            "Benchmark indisponível: verifique PostgreSQL, migrações e Ollama local.",
+            "Benchmark indisponível: verifique PostgreSQL, migrações e o provedor de embeddings configurado.",
             file=sys.stderr,
         )
         return 1

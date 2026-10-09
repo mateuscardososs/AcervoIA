@@ -7,6 +7,7 @@ import {
   type DocumentRecord,
 } from "../api/client";
 import { LoadingState } from "../components/LoadingState";
+import { useAuth } from "../auth/AuthProvider";
 
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -26,6 +27,7 @@ function processingLabel(status: DocumentRecord["processing_status"]): string {
 }
 
 export function CollectionPage() {
+  const { user } = useAuth();
   const { collectionId = "" } = useParams();
   const [collection, setCollection] = useState<Collection | null>(null);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
@@ -132,7 +134,7 @@ export function CollectionPage() {
         </Link>
       </header>
 
-      <section className="upload-panel" aria-labelledby="upload-title">
+      {!user?.is_demo && <section className="upload-panel" aria-labelledby="upload-title">
         <div className="upload-intro">
           <span className="upload-symbol" aria-hidden="true">↑</span>
           <div>
@@ -156,7 +158,7 @@ export function CollectionPage() {
             {uploading ? "Enviando…" : "Enviar arquivo"}
           </button>
         </form>
-      </section>
+      </section>}
 
       {error && <p className="notice notice-error" role="alert">{error}</p>}
       {notice && <p className="notice notice-success" role="status">{notice}</p>}
@@ -200,12 +202,12 @@ export function CollectionPage() {
                     className="button button-secondary button-small"
                     to={`/collections/${collectionId}/documents/${document.id}`}
                   >Detalhes</Link>
-                  <button
+                  {!user?.is_demo && <button
                     aria-label={`Excluir ${document.original_filename}`}
                     className="icon-button icon-button-danger"
                     onClick={() => void remove(document)}
                     type="button"
-                  >×</button>
+                  >×</button>}
                 </div>
               </article>
             ))}

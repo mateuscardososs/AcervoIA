@@ -2,13 +2,14 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from acervo_ia.api.document_scope import validate_document_filter
+from acervo_ia import config
 from acervo_ia.db.connection import get_db
 from acervo_ia.db.models import Collection, QuestionHistory, User
 from acervo_ia.security import get_current_user
@@ -18,6 +19,7 @@ from acervo_ia.services.embeddings import (
     EmbeddingDimensionError,
     EmbeddingServiceError,
 )
+from acervo_ia.services.usage_limits import reserve_demo_question, reserve_gemini_call, require_public_demo_enabled
 
 router = APIRouter(prefix="/collections", tags=["questions and answers"])
 
@@ -81,39 +83,59 @@ def _get_owned_collection(
 def ask_collection(
     collection_id: UUID,
     request: AskRequest,
+    http_request: Request,
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> AskResponse:
     # Enforce tenant ownership before embedding, searching, or using the chat model.
     collection = _get_owned_collection(collection_id, user, session)
+    if user.is_demo:
+        require_public_demo_enabled(session)
+        if len(request.question) > config.DEMO_MAX_QUESTION_CHARS:
+            raise HTTPException(status_code=422, detail="A pergunta excede o limite da demonstração.")
+        reserve_demo_question(session, http_request)
     document_ids = validate_document_filter(
         session,
         collection_id=collection.id,
         document_ids=request.document_ids,
     )
+    chat_provider = config.DEMO_CHAT_PROVIDER if user.is_demo else config.CHAT_PROVIDER
+    embedding_provider = (
+        config.DEMO_EMBEDDING_PROVIDER if user.is_demo else config.EMBEDDING_PROVIDER
+    )
     try:
+        answer_options = {
+            "chat_provider": chat_provider,
+            "embedding_provider": embedding_provider,
+        }
+        if chat_provider == "gemini":
+            answer_options["before_chat_call"] = lambda: reserve_gemini_call(session)
+        if embedding_provider == "gemini":
+            answer_options["before_embedding_call"] = lambda: reserve_gemini_call(session)
         answer = question_answering.answer_question(
             session,
             collection_id=collection.id,
             question=request.question,
-            limit=request.limit,
+            limit=min(request.limit, 5) if user.is_demo else request.limit,
             strategy=request.strategy,
             document_ids=document_ids,
+            max_context_chars=(config.DEMO_MAX_CONTEXT_CHARS if user.is_demo else None),
+            **answer_options,
         )
     except EmbeddingDimensionError:
         raise HTTPException(
             status_code=502,
-            detail="O modelo local retornou vetores incompatíveis com a busca.",
+            detail="O provedor de embeddings retornou vetores incompatíveis com a busca.",
         ) from None
     except EmbeddingServiceError:
         raise HTTPException(
             status_code=503,
-            detail="Não foi possível usar o serviço local de embeddings.",
+            detail="Não foi possível usar o serviço de embeddings.",
         ) from None
     except ChatModelError:
         raise HTTPException(
             status_code=503,
-            detail="Não foi possível gerar uma resposta com o modelo local.",
+            detail="Não foi possível gerar uma resposta com o provedor configurado.",
         ) from None
     except question_answering.InvalidModelAnswer:
         raise HTTPException(status_code=502, detail=INVALID_MODEL_ANSWER) from None
@@ -121,7 +143,7 @@ def ask_collection(
         answer=answer.answer,
         sources=[AskSource(**source.__dict__) for source in answer.sources],
     )
-    if not answer.correction_failed:
+    if not answer.correction_failed and not user.is_demo:
         history_entry = QuestionHistory(
             collection_id=collection.id,
             question=request.question,
@@ -154,6 +176,8 @@ def list_collection_history(
     offset: int = Query(default=0, ge=0),
 ) -> AskHistoryPage:
     collection = _get_owned_collection(collection_id, user, session)
+    if user.is_demo:
+        return AskHistoryPage(items=[], limit=limit, offset=offset, has_more=False)
     entries = session.scalars(
         select(QuestionHistory)
         .where(QuestionHistory.collection_id == collection.id)

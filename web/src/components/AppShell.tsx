@@ -41,6 +41,11 @@ export function AppShell() {
         </div>
       </aside>
       <main className="main-region">
+        {user?.is_demo && (
+          <div className="demo-session-banner" role="status">
+            Demonstração · dados fictícios · somente leitura. Perguntas/trechos podem ir ao Gemini; não envie dados sensíveis.
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

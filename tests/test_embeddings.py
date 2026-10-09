@@ -14,6 +14,7 @@ from acervo_ia.db.connection import get_db
 from acervo_ia.db.models import Base, Collection, Document, DocumentChunk, User
 from acervo_ia.main import app
 from acervo_ia.api.routes import embeddings as embedding_routes
+from acervo_ia import config
 from acervo_ia.security import create_access_token
 from acervo_ia.services import embeddings as embedding_service
 from acervo_ia.services import semantic_search
@@ -204,6 +205,7 @@ def test_document_embeddings_are_saved_per_chunk_with_model(
         "error": None,
         "result_count": 2,
         "embedding_model": "embeddinggemma",
+        "embedding_provider": "ollama",
         "created_at": response.json()["created_at"],
         "updated_at": response.json()["updated_at"],
     }
@@ -276,6 +278,7 @@ def test_invalid_embedding_dimension_does_not_overwrite_stored_vectors(
         for chunk in chunks:
             chunk.embedding = vectors(1)[0]
             chunk.embedding_model = "previous-model"
+            chunk.embedding_provider = "ollama"
         session.commit()
     mocked_ollama(
         monkeypatch,
@@ -509,6 +512,40 @@ def test_search_strategy_dispatch_and_text_does_not_call_ollama(
     assert calls[-1] == expected_search
     assert ("embedding" in calls) is (strategy != "text")
     assert search_kwargs["document_ids"] is None
+
+
+def test_search_uses_configured_embedding_provider_and_model(
+    embeddings_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, collection_id, _, token = create_owned_document()
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "gemini")
+    monkeypatch.setattr(embedding_routes, "reserve_gemini_call", lambda _session: None)
+    generated: list[dict[str, Any]] = []
+    searched: list[dict[str, Any]] = []
+
+    def generate(texts: list[str], **kwargs: Any) -> list[list[float]]:
+        generated.append({"texts": texts, **kwargs})
+        return [[0.0] * 768]
+
+    monkeypatch.setattr(embedding_routes, "_generate", generate)
+    monkeypatch.setattr(
+        embedding_routes,
+        "search_chunks",
+        lambda *_args, **kwargs: searched.append(kwargs) or [],
+    )
+
+    response = embeddings_client.post(
+        f"/collections/{collection_id}/search",
+        json={"query": "consulta", "strategy": "vector"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert generated[0]["provider"] == "gemini"
+    assert generated[0]["before_call"] is not None
+    assert searched[0]["embedding_provider"] == "gemini"
+    assert searched[0]["embedding_model"] == config.GEMINI_EMBEDDING_MODEL
 
 
 def test_search_defaults_to_hybrid(

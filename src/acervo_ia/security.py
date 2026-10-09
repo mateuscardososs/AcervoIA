@@ -9,9 +9,12 @@ from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
+from acervo_ia import config
 from acervo_ia.db.connection import get_db
-from acervo_ia.db.models import User
+from acervo_ia.db.models import Collection, Document, RuntimeSetting, User
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -20,6 +23,20 @@ AUTH_UNAVAILABLE_DETAIL = "Autenticação indisponível temporariamente."
 
 class AuthenticationConfigurationError(RuntimeError):
     """Indicates that token signing cannot be used with the current configuration."""
+
+
+def validate_demo_account(session: Session, user: User) -> bool:
+    collections = session.scalars(
+        select(Collection).where(Collection.owner_id == user.id)
+    ).all()
+    if len(collections) != 1 or collections[0].name != config.DEMO_COLLECTION_NAME:
+        return False
+    filenames = session.scalars(
+        select(Document.original_filename).where(
+            Document.collection_id == collections[0].id
+        )
+    ).all()
+    return bool(filenames) and all(name.startswith("[DEMO FICTÍCIO] ") for name in filenames)
 
 password_hash = PasswordHash.recommended()
 dummy_password_hash = password_hash.hash("invalid-user-password-check")
@@ -43,10 +60,8 @@ def get_auth_secret() -> str:
     return secret
 
 
-def create_access_token(subject: str) -> str:
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-    )
+def create_access_token(subject: str, *, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
     return jwt.encode(
         {"sub": subject, "exp": expires_at},
         get_auth_secret(),
@@ -87,4 +102,23 @@ def get_current_user(
     user = session.get(User, user_id)
     if user is None:
         raise credentials_error
+    if user.is_demo:
+        try:
+            enabled = session.scalar(
+                select(RuntimeSetting.value).where(
+                    RuntimeSetting.key == "public_demo_enabled"
+                )
+            )
+            demo_account_valid = validate_demo_account(session, user)
+        except SQLAlchemyError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demonstração indisponível.",
+            ) from None
+        if (
+            not config.DEMO_ENABLED
+            or enabled != "true"
+            or not demo_account_valid
+        ):
+            raise HTTPException(status_code=404, detail="Demonstração indisponível.")
     return user

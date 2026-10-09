@@ -1,0 +1,67 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      ["uvicorn", "acervo_ia.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "${FORWARDED_ALLOW_IPS:-172.30.255.3}"]
+    env_file: .env
+    environment:
+      APP_ENV: production
+      STORAGE_BACKEND: s3
+      WORKER_DATABASE_HOST: ""
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: ${API_SERVICE_IPV4:-172.30.255.2}
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "acervo_ia.worker"]
+    env_file: .env
+    environment:
+      APP_ENV: production
+      STORAGE_BACKEND: s3
+      WORKER_DATABASE_HOST: ""
+    healthcheck:
+      test: ["CMD", "python", "-c", "from acervo_ia.db.connection import ping_database; ping_database()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: ${WORKER_SERVICE_IPV4:-172.30.255.4}
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: ${WEB_PROXY_IPV4:-172.30.255.3}
+
+networks:
+  app:
+    ipam:
+      config:
+        - subnet: ${COMPOSE_NETWORK_SUBNET:-172.30.255.0/24}

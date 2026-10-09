@@ -407,7 +407,7 @@ def test_unavailable_ollama_is_reported_without_provider_details(
 
     assert evaluate_answers.main() == 3
     captured = capsys.readouterr()
-    assert "Ollama indisponível" in captured.err
+    assert "provedor de IA configurado" in captured.err
     assert "private provider" not in captured.err
     assert captured.out == ""
 

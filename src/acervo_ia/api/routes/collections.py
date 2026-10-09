@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from acervo_ia.db.connection import get_db
+from acervo_ia.api.demo_access import ensure_writable_user
 from acervo_ia.db.models import Collection, User
 from acervo_ia.security import get_current_user
 
@@ -83,6 +84,7 @@ def create_collection(
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> CollectionResponse:
+    ensure_writable_user(user)
     collection = Collection(
         owner_id=user.id,
         name=payload.name,
@@ -129,6 +131,7 @@ def update_collection(
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> CollectionResponse:
+    ensure_writable_user(user)
     collection = _get_owned_collection(collection_id, user, session)
     changes = payload.model_dump(exclude_unset=True)
     if "name" in changes and changes["name"] is None:
@@ -155,6 +158,7 @@ def delete_collection(
     session: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
+    ensure_writable_user(user)
     collection = _get_owned_collection(collection_id, user, session)
     session.delete(collection)
     session.commit()

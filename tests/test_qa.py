@@ -235,6 +235,74 @@ def test_answers_with_backend_validated_source_metadata(
     assert source_text in requests[0]["messages"][1]["content"]
 
 
+@pytest.mark.parametrize(
+    ("chat_provider", "embedding_provider"),
+    [("gemini", "ollama"), ("ollama", "gemini")],
+)
+def test_ask_selects_chat_and_embedding_providers_independently(
+    qa_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    chat_provider: str,
+    embedding_provider: str,
+) -> None:
+    from acervo_ia.api.routes import qa as qa_routes
+    from acervo_ia import config
+
+    _, collection_id, token = create_collection()
+    monkeypatch.setattr(config, "CHAT_PROVIDER", chat_provider)
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", embedding_provider)
+    monkeypatch.setattr(qa_routes, "reserve_gemini_call", lambda _session: None)
+    source_text = "O procedimento fictício está na seção 4."
+    hit = search_hit(content=source_text)
+    embedding_calls: list[dict[str, Any]] = []
+    search_calls: list[dict[str, Any]] = []
+    chat_calls: list[dict[str, Any]] = []
+
+    def generate_embeddings(texts: list[str], **kwargs: Any) -> list[list[float]]:
+        embedding_calls.append({"texts": texts, **kwargs})
+        callback = kwargs.get("before_call")
+        if callback:
+            callback()
+        return [[0.0] * 768]
+
+    def search_vector(*_args: Any, **kwargs: Any) -> list[SearchHit]:
+        search_calls.append(kwargs)
+        return [hit]
+
+    def generate_chat(messages: list[dict[str, str]], **kwargs: Any) -> str:
+        chat_calls.append({"messages": messages, **kwargs})
+        callback = kwargs.get("before_call")
+        if callback:
+            callback()
+        return json.dumps(
+            {"answer": "O procedimento está na seção 4. [S1]", "citations": ["S1"]}
+        )
+
+    monkeypatch.setattr(answering_service, "generate_embeddings", generate_embeddings)
+    monkeypatch.setattr(answering_service, "search_chunks", search_vector)
+    monkeypatch.setattr(answering_service, "generate_chat_completion", generate_chat)
+
+    response = qa_client.post(
+        f"/collections/{collection_id}/ask",
+        json={"question": "Qual procedimento?", "strategy": "vector"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    expected_model = (
+        config.GEMINI_EMBEDDING_MODEL
+        if embedding_provider == "gemini"
+        else config.OLLAMA_EMBEDDING_MODEL
+    )
+    assert response.status_code == 200
+    assert embedding_calls[0]["provider"] == embedding_provider
+    assert search_calls[0]["embedding_provider"] == embedding_provider
+    assert search_calls[0]["embedding_model"] == expected_model
+    assert chat_calls[0].get("provider", config.CHAT_PROVIDER) == chat_provider
+    assert (chat_calls[0].get("before_call") is not None) is (
+        chat_provider == "gemini"
+    )
+
+
 @pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])
 def test_no_retrieved_evidence_skips_chat_and_abstains(
     qa_client: TestClient,
@@ -342,6 +410,40 @@ def test_invalid_reference_after_one_correction_returns_safe_answer_without_sour
     )
     assert history.status_code == 200
     assert history.json()["items"] == []
+
+
+def test_one_controlled_correction_consumes_a_second_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = json.dumps({"answer": "Resposta [S9]", "citations": ["S9"]})
+    corrected = json.dumps({"answer": "Resposta sustentada [S1]", "citations": ["S1"]})
+    replies = iter([first, corrected])
+    provider_calls = 0
+
+    monkeypatch.setattr(
+        answering_service,
+        "search_text_chunks",
+        lambda *_args, **_kwargs: [search_hit()],
+    )
+
+    def generate(_messages: list[dict[str, str]], *, before_call=None) -> str:
+        nonlocal provider_calls
+        before_call()
+        provider_calls += 1
+        return next(replies)
+
+    monkeypatch.setattr(answering_service, "generate_chat_completion", generate)
+    result = answering_service.answer_question(
+        None,
+        collection_id=UUID(int=9),
+        question="Pergunta fictícia",
+        limit=5,
+        strategy="text",
+        before_provider_call=lambda: None,
+    )
+    assert result.correction_attempted is True
+    assert result.correction_failed is False
+    assert provider_calls == 2
 
 
 @pytest.mark.parametrize("strategy", ["vector", "text", "hybrid"])

@@ -1,6 +1,7 @@
 import json
 import re
 from collections.abc import Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
@@ -174,8 +175,26 @@ def _validated_answer(raw_answer: str, hits: list[SearchHit]) -> ValidatedAnswer
     return ValidatedAnswer(answer.strip(), sources)
 
 
-def _query_vector(question: str) -> list[float]:
-    vectors = generate_embeddings([question], model=config.OLLAMA_EMBEDDING_MODEL)
+def _embedding_model(provider: str) -> str:
+    return (
+        config.GEMINI_EMBEDDING_MODEL
+        if provider == "gemini"
+        else config.OLLAMA_EMBEDDING_MODEL
+    )
+
+
+def _query_vector(
+    question: str,
+    provider: str,
+    before_provider_call: Callable[[], None] | None = None,
+) -> list[float]:
+    model = _embedding_model(provider)
+    vectors = generate_embeddings(
+        [question],
+        model=model,
+        provider=provider,
+        before_call=before_provider_call,
+    )
     if len(vectors) != 1:
         raise InvalidModelAnswer
     return vectors[0]
@@ -189,8 +208,22 @@ def answer_question(
     limit: int,
     strategy: Literal["vector", "text", "hybrid"],
     document_ids: Sequence[UUID] | None = None,
+    before_provider_call: Callable[[], None] | None = None,
+    before_embedding_call: Callable[[], None] | None = None,
+    before_chat_call: Callable[[], None] | None = None,
+    max_context_chars: int | None = None,
+    provider: str | None = None,
+    embedding_provider: str | None = None,
+    chat_provider: str | None = None,
 ) -> AnswerResult:
     """Run retrieval, chat, and strict source validation without HTTP coupling."""
+    selected_embedding_provider = (
+        embedding_provider or provider or config.EMBEDDING_PROVIDER
+    )
+    selected_chat_provider = chat_provider or provider or config.CHAT_PROVIDER
+    embedding_call = before_embedding_call or before_provider_call
+    chat_call = before_chat_call or before_provider_call
+    embedding_model = _embedding_model(selected_embedding_provider)
     if strategy == "text":
         hits = search_text_chunks(
             session,
@@ -200,13 +233,17 @@ def answer_question(
             document_ids=document_ids,
         )
     else:
-        query_vector = _query_vector(question)
+        query_vector = _query_vector(
+            question, selected_embedding_provider, embedding_call
+        )
+        provider_filter = {"embedding_provider": selected_embedding_provider}
         if strategy == "vector":
             hits = search_chunks(
                 session,
                 collection_id=collection_id,
                 embedding=query_vector,
-                embedding_model=config.OLLAMA_EMBEDDING_MODEL,
+                embedding_model=embedding_model,
+                **provider_filter,
                 limit=limit,
                 document_ids=document_ids,
             )
@@ -216,7 +253,8 @@ def answer_question(
                 collection_id=collection_id,
                 query=question,
                 embedding=query_vector,
-                embedding_model=config.OLLAMA_EMBEDDING_MODEL,
+                embedding_model=embedding_model,
+                **provider_filter,
                 limit=limit,
                 document_ids=document_ids,
             )
@@ -228,16 +266,34 @@ def answer_question(
     if not hits:
         return AnswerResult(NO_EVIDENCE_ANSWER, (), ())
 
-    messages = _messages(question, hits)
-    raw_answer = generate_chat_completion(messages)
+    if max_context_chars is not None:
+        clipped: list[SearchHit] = []
+        remaining = max_context_chars
+        for hit in hits:
+            if remaining <= 0:
+                break
+            excerpt = hit.content[:remaining]
+            clipped.append(SearchHit(**{**hit.__dict__, "content": excerpt}))
+            remaining -= len(excerpt)
+        hits_for_prompt = clipped
+    else:
+        hits_for_prompt = hits
+    messages = _messages(question, hits_for_prompt)
+    chat_options = {}
+    if selected_chat_provider != config.CHAT_PROVIDER:
+        chat_options["provider"] = selected_chat_provider
+    if chat_call is not None:
+        chat_options["before_call"] = chat_call
+    raw_answer = generate_chat_completion(messages, **chat_options)
     try:
-        validated = _validated_answer(raw_answer, hits)
+        validated = _validated_answer(raw_answer, hits_for_prompt)
     except InvalidModelAnswer:
         raise InvalidModelAnswer(retrieved_hits=hits, search_completed=True) from None
     except InvalidSourceReferences:
-        corrected_answer = generate_chat_completion(_correction_messages(messages, hits))
+        correction_messages = _correction_messages(messages, hits_for_prompt)
+        corrected_answer = generate_chat_completion(correction_messages, **chat_options)
         try:
-            validated = _validated_answer(corrected_answer, hits)
+            validated = _validated_answer(corrected_answer, hits_for_prompt)
         except (InvalidSourceReferences, InvalidModelAnswer):
             return AnswerResult(
                 SOURCE_VALIDATION_FAILURE_ANSWER,

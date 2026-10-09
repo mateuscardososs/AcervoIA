@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     CheckConstraint,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -31,6 +32,9 @@ class User(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    is_demo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -122,8 +126,9 @@ class DocumentChunk(Base):
             name="ck_document_chunks_page_number",
         ),
         CheckConstraint(
-            "(embedding IS NULL) = (embedding_model IS NULL)",
-            name="ck_document_chunks_embedding_model_pair",
+            "(embedding IS NULL) = (embedding_model IS NULL) AND "
+            "(embedding IS NULL) = (embedding_provider IS NULL)",
+            name="ck_document_chunks_embedding_metadata_pair",
         ),
     )
 
@@ -141,6 +146,7 @@ class DocumentChunk(Base):
         nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    embedding_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
@@ -185,6 +191,7 @@ class DocumentTask(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    embedding_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -231,6 +238,38 @@ class QuestionHistory(Base):
     )
 
     collection: Mapped["Collection"] = relationship(back_populates="question_history")
+
+
+class RuntimeSetting(Base):
+    """Small database-backed operational switches shared by API instances."""
+
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class UsageBucket(Base):
+    """Atomic shared rate-limit counters; keys are HMACs, never raw IPs."""
+
+    __tablename__ = "usage_buckets"
+    __table_args__ = (
+        UniqueConstraint("scope", "key_hash", "window_start", name="uq_usage_bucket_window"),
+        CheckConstraint("count >= 0", name="ck_usage_bucket_count"),
+        Index("ix_usage_buckets_window", "window_start"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    scope: Mapped[str] = mapped_column(String(30), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 Index(

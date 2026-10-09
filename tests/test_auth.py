@@ -85,7 +85,7 @@ def test_login_returns_bearer_token_and_password_is_stored_as_hash(
         headers={"Authorization": f"Bearer {response.json()['access_token']}"},
     )
     assert user.status_code == 200
-    assert user.json() == {"id": str(user_id), "email": email}
+    assert user.json() == {"id": str(user_id), "email": email, "is_demo": False}
     assert "password_hash" not in user.json()
 
 

@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -27,8 +27,11 @@ def evaluate_in_session(
     questions: list[dict[str, Any]],
     section_vectors: list[list[float]],
     embedding_model: str,
+    before_embedding_call: Callable[[], None] | None = None,
+    before_chat_call: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     """Seed, ask through the shared QA service, aggregate, and always roll back."""
+    from acervo_ia import config
     from acervo_ia.db.models import Collection, Document, DocumentChunk, User
     from acervo_ia.services.answer_evaluation import (
         AnswerEvaluationRecord,
@@ -90,6 +93,7 @@ def evaluate_in_session(
                 content=section["content"],
                 embedding=vector,
                 embedding_model=embedding_model,
+                embedding_provider=config.EMBEDDING_PROVIDER,
             )
             positions[equipment] += 1
             session.add(chunk)
@@ -113,6 +117,8 @@ def evaluate_in_session(
                         question=question["question"],
                         limit=5,
                         strategy=strategy,
+                        before_embedding_call=before_embedding_call,
+                        before_chat_call=before_chat_call,
                     )
                 except InvalidModelAnswer as error:
                     latency_ms = (perf_counter() - started) * 1_000
@@ -262,17 +268,42 @@ def evaluate() -> dict[str, object]:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+        embedding_provider = config.EMBEDDING_PROVIDER
+        embedding_model = (
+            config.GEMINI_EMBEDDING_MODEL
+            if embedding_provider == "gemini"
+            else config.OLLAMA_EMBEDDING_MODEL
+        )
+
+        def reserve_gemini_request() -> None:
+            from acervo_ia.services.usage_limits import reserve_gemini_call
+
+            with Session(engine) as quota_session:
+                reserve_gemini_call(quota_session)
+
         section_vectors = generate_embeddings(
             [section["content"] for section in sections],
-            model=config.OLLAMA_EMBEDDING_MODEL,
+            model=embedding_model,
+            provider=embedding_provider,
+            before_call=(
+                reserve_gemini_request if embedding_provider == "gemini" else None
+            ),
         )
         session = Session(engine, autoflush=False, expire_on_commit=False)
+        before_embedding_call = (
+            reserve_gemini_request if embedding_provider == "gemini" else None
+        )
+        before_chat_call = (
+            reserve_gemini_request if config.CHAT_PROVIDER == "gemini" else None
+        )
         return evaluate_in_session(
             session,
             sections=sections,
             questions=questions,
             section_vectors=section_vectors,
-            embedding_model=config.OLLAMA_EMBEDDING_MODEL,
+            embedding_model=embedding_model,
+            before_embedding_call=before_embedding_call,
+            before_chat_call=before_chat_call,
         )
     finally:
         engine.dispose()
@@ -294,7 +325,7 @@ def main() -> int:
         return 2
     except (EmbeddingServiceError, ChatModelError):
         print(
-            "Benchmark não executado: Ollama indisponível ou modelo local não utilizável.",
+            "Benchmark não executado: o provedor de IA configurado está indisponível ou bloqueado pelo limite.",
             file=sys.stderr,
         )
         return 3

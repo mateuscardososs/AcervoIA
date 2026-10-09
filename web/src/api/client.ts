@@ -11,7 +11,7 @@ export class ApiError extends Error {
   }
 }
 
-export type AuthenticatedUser = { id: string; email: string };
+export type AuthenticatedUser = { id: string; email: string; is_demo: boolean };
 export type Collection = {
   id: string;
   name: string;
@@ -37,6 +37,7 @@ export type DocumentTaskRecord = {
   error: string | null;
   result_count: number | null;
   embedding_model: string | null;
+  embedding_provider: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -150,6 +151,11 @@ export const api = {
     return request<{ access_token: string; token_type: string }>("/auth/token", {
       method: "POST",
       body,
+    });
+  },
+  demoSession() {
+    return request<{ access_token: string; token_type: string }>("/auth/demo-session", {
+      method: "POST",
     });
   },
   me() {

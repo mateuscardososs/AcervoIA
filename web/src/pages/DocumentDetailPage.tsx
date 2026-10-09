@@ -8,6 +8,7 @@ import {
   type DocumentTaskRecord,
 } from "../api/client";
 import { LoadingState } from "../components/LoadingState";
+import { useAuth } from "../auth/AuthProvider";
 
 function documentStatus(status: DocumentRecord["processing_status"]): string {
   return {
@@ -19,6 +20,7 @@ function documentStatus(status: DocumentRecord["processing_status"]): string {
 }
 
 export function DocumentDetailPage() {
+  const { user } = useAuth();
   const { collectionId = "", documentId = "" } = useParams();
   const [collection, setCollection] = useState<Collection | null>(null);
   const [document, setDocument] = useState<DocumentRecord | null>(null);
@@ -108,7 +110,7 @@ export function DocumentDetailPage() {
     } catch (cause) {
       setStep(null);
       if (cause instanceof ApiError && cause.status === 503) {
-        setError("Ollama indisponível. Inicie o serviço local e confira se o modelo de embeddings está instalado.");
+        setError("O provedor de embeddings está indisponível. Confira a configuração do serviço de IA.");
         setNotice("O texto foi processado; os vetores podem ser gerados novamente depois.");
       } else if (cause instanceof ApiError && cause.status === 422) {
         setError("Não foi possível extrair texto deste arquivo. O documento foi mantido para uma nova tentativa.");
@@ -197,9 +199,9 @@ export function DocumentDetailPage() {
           </p>
         )}
         <div className="document-detail-actions">
-          <button className="button button-primary" disabled={active} onClick={() => void process()} type="button">
+          {!user?.is_demo && <button className="button button-primary" disabled={active} onClick={() => void process()} type="button">
             {active ? "Processando…" : document.processing_status === "completed" ? "Reprocessar e atualizar busca" : "Processar documento"}
-          </button>
+          </button>}
           <Link className="button button-secondary" to={`/collections/${collection.id}`}>Voltar à coleção</Link>
         </div>
       </section>

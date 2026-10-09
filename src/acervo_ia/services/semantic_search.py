@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import Select, desc, func, literal_column, select
 from sqlalchemy.orm import Session
 
+from acervo_ia import config
 from acervo_ia.db.models import Document, DocumentChunk
 
 
@@ -68,6 +69,7 @@ def build_search_statement(
     collection_id: UUID,
     embedding: list[float],
     embedding_model: str,
+    embedding_provider: str | None = None,
     limit: int,
     document_ids: Sequence[UUID] | None = None,
 ) -> Select[tuple[DocumentChunk, Document, float]]:
@@ -79,6 +81,8 @@ def build_search_statement(
             Document.collection_id == collection_id,
             DocumentChunk.embedding.is_not(None),
             DocumentChunk.embedding_model == embedding_model,
+            DocumentChunk.embedding_provider
+            == (embedding_provider or config.EMBEDDING_PROVIDER),
         )
     )
     if document_ids:
@@ -92,6 +96,7 @@ def search_chunks(
     collection_id: UUID,
     embedding: list[float],
     embedding_model: str,
+    embedding_provider: str | None = None,
     limit: int,
     document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
@@ -100,6 +105,7 @@ def search_chunks(
             collection_id=collection_id,
             embedding=embedding,
             embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
             limit=limit,
             document_ids=document_ids,
         )
@@ -259,6 +265,7 @@ def search_hybrid_chunks(
     query: str,
     embedding: list[float],
     embedding_model: str,
+    embedding_provider: str | None = None,
     limit: int,
     document_ids: Sequence[UUID] | None = None,
 ) -> list[SearchHit]:
@@ -270,6 +277,7 @@ def search_hybrid_chunks(
                 collection_id=collection_id,
                 embedding=embedding,
                 embedding_model=embedding_model,
+                embedding_provider=embedding_provider,
                 limit=component_limit,
                 document_ids=document_ids,
             ),
